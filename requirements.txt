@@ -1,0 +1,9 @@
+# No third-party runtime dependencies — all stdlib.
+# Install dev/optional extras below if needed.
+
+# Optional: real federated learning backend
+# flwr>=1.8
+
+# Optional: MIMIC dataset processing
+# pandas>=2.0
+# numpy>=1.26
