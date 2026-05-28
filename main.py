@@ -30,6 +30,8 @@ def main(stdscr):
     client = OllamaDiagnosticClient()
 
     # ── Ollama health check ───────────────────────────────────────────────────
+    # Speed tip: export OLLAMA_NUM_PARALLEL=4 before `ollama serve` to let
+    # the server process multiple patients concurrently (GPU VRAM permitting).
     ollama_error = None
     if client.health_check():
         q = world.clinic_queue

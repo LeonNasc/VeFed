@@ -78,21 +78,24 @@ class ClinicQueue:
     Agents whose σ ≥ γ_a are enqueued; the DiagnosticClient processes them.
     """
     def __init__(self):
+        import threading
         self.patients: deque[DiagnosticEvent] = deque()
         self.processed: list[DiagnosticEvent] = []  # outcome archive
         self.current_patient: str = ""   # name being processed right now
-        self.current_status:  str = ""   # e.g. 'Doctor thinking…'
+        self.current_status:  str = ""   # e.g. '3/10 done'
         self._status_callback = None    # set by TUI
+        self._status_lock = threading.Lock()  # guards callback under concurrent use
 
     def set_status_callback(self, fn) -> None:
         """Register a zero-arg callable; called after each status update."""
         self._status_callback = fn
 
     def update_status(self, patient: str, status: str) -> None:
-        self.current_patient = patient
-        self.current_status  = status
-        if self._status_callback:
-            self._status_callback()
+        with self._status_lock:
+            self.current_patient = patient
+            self.current_status  = status
+            if self._status_callback:
+                self._status_callback()
 
     def enqueue(self, event: DiagnosticEvent) -> None:
         self.patients.append(event)
@@ -100,23 +103,45 @@ class ClinicQueue:
     def dequeue(self) -> Optional[DiagnosticEvent]:
         return self.patients.popleft() if self.patients else None
 
-    def process_all(self, diagnostic_fn) -> list[DiagnosticEvent]:
+    def process_all(self, diagnostic_fn,
+                    max_workers: int = 4) -> list[DiagnosticEvent]:
         """
         Extension point → DiagnosticClient.
         diagnostic_fn(event) -> DiagnosticEvent with action + oracle_label filled.
+
+        max_workers: concurrent Ollama requests in-flight. Python socket I/O
+        releases the GIL, so real overlap happens even on one CPU. Tune to
+        how many parallel slots your Ollama server allows
+        (OLLAMA_NUM_PARALLEL env var, default 1 on CPU / 4 on GPU).
         """
-        results = []
-        total   = len(self.patients)
-        done    = 0
-        while self.patients:
-            ev   = self.patients.popleft()
-            done += 1
-            self.update_status(ev.agent_id,
-                f"Patient {done}/{total} — opening consultation…")
-            ev = diagnostic_fn(ev)
-            self.update_status(ev.agent_id, "")
-            results.append(ev)
-            self.processed.append(ev)
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        patients = list(self.patients)
+        self.patients.clear()
+        total    = len(patients)
+        _done    = [0]
+        _lock    = threading.Lock()
+
+        def _process(ev: DiagnosticEvent) -> DiagnosticEvent:
+            result = diagnostic_fn(ev)
+            with _lock:
+                _done[0] += 1
+                self.update_status(
+                    result.agent_id,
+                    f"{_done[0]}/{total} done",
+                )
+            return result
+
+        results: list[DiagnosticEvent] = []
+        with ThreadPoolExecutor(max_workers=min(max_workers, total or 1)) as pool:
+            futures = {pool.submit(_process, ev): ev for ev in patients}
+            for fut in as_completed(futures):
+                result = fut.result()
+                results.append(result)
+                self.processed.append(result)
+
+        self.update_status("", "")
         return results
 
     def apply_outcomes(self, results: list[DiagnosticEvent],

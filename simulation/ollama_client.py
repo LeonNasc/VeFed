@@ -20,29 +20,31 @@ from simulation.models import DiagnosticAction, DiagnosticEvent
 OLLAMA_URL    = "http://localhost:11434/api/chat"
 MODEL         = "mistral"
 TIMEOUT_SEC   = 30
-MAX_FOLLOWUPS = 2
+MAX_FOLLOWUPS = 1   # was 2 — each follow-up is a full round-trip; keep to 1
 
 SYSTEM_PROMPT = """\
-You are a clinical triage doctor in a busy clinic. A patient describes their symptoms \
-in their own words. Your job is to triage them using only what they tell you.
+You are a clinical triage doctor. A patient describes their symptoms in their own words.
+Triage them based solely on what they report.
 
-You may ask up to 2 follow-up questions to gather more information before deciding. \
-Each response must be a single JSON object — nothing else.
+DEFAULT: decide immediately on the first turn.
+Only ask ONE follow-up if breathing status or oxygen level is completely absent
+and the severity is ambiguous. Never ask more than one question.
 
-While gathering information, respond with:
-{"type": "question", "text": "<your follow-up question>"}
+Each response must be a single JSON object — no other text.
 
-When ready to decide, respond with:
+To ask a follow-up:
+{"type": "question", "text": "<one concise question>"}
+
+To give your decision:
 {"type": "decision", "action": "<home_recovery|resolve|hospitalise>", \
-"label": "<mild|moderate|severe>", "diagnosis": "<your clinical diagnosis>", \
+"label": "<mild|moderate|severe>", "diagnosis": "<brief diagnosis>", \
 "notes": "<one sentence rationale>"}
 
 Rules:
-- home_recovery: mild symptoms, patient can rest at home
-- resolve: moderate symptoms, needs treatment/prescription
-- hospitalise: severe symptoms, requires immediate admission
-- Base your decision solely on what the patient reports. Do not ask for numbers.
-- Be concise. One question at a time.
+- home_recovery : mild — patient rests at home
+- resolve       : moderate — needs prescription or treatment plan
+- hospitalise   : severe — immediate admission required
+- Do not ask for numbers or vitals. One question maximum.
 """
 
 

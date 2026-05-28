@@ -1,9 +1,17 @@
-# No third-party runtime dependencies — all stdlib.
-# Install dev/optional extras below if needed.
+# ── Federated learning backends (install one or both) ─────────────────────────
+flwr>=1.8                # Flower — pip install flwr>=1.8
+fedn>=0.20               # FedN  — pip install fedn
 
-# Optional: real federated learning backend
-# flwr>=1.8
+# ── LoRA fine-tuning stack ────────────────────────────────────────────────────
+torch>=2.1
+transformers>=4.40
+peft>=0.11               # LoRA adapters via PEFT
+accelerate>=0.29         # required by PEFT / transformers trainer
 
-# Optional: MIMIC dataset processing
+# ── Visualization ─────────────────────────────────────────────────────────────
+matplotlib>=3.8
+numpy>=1.26
+scikit-learn>=1.4        # PCA for embedding scatter plots
+
+# ── Optional: MIMIC dataset processing ───────────────────────────────────────
 # pandas>=2.0
-# numpy>=1.26
