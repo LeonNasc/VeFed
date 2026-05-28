@@ -18,8 +18,8 @@ import urllib.error
 from simulation.models import DiagnosticAction, DiagnosticEvent
 
 OLLAMA_URL    = "http://localhost:11434/api/chat"
-MODEL         = "mistral"
-TIMEOUT_SEC   = 30
+MODEL         = "phi3:mini"
+TIMEOUT_SEC   = 60
 MAX_FOLLOWUPS = 1   # was 2 — each follow-up is a full round-trip; keep to 1
 
 SYSTEM_PROMPT = """\

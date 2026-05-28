@@ -299,13 +299,14 @@ class WorldEngine:
             loc = self.locations.get(agent.current_location)
             if loc is None:
                 continue
-            # β · Σ I(a' ∈ I_t)  +  ω(l_t)
+            # (β · Σ I(a' ∈ I_t) + ω(l_t)) / T  — divide by ticks/day so
+            # BASE_BETA is a daily rate and cumulative_exposure ≈ β at day's end.
             n_infectious = sum(
                 1 for aid in loc.agents_present
                 if self.agents_by_id[aid].status == HealthStatus.INFECTED
             )
             beta = self.BASE_BETA * self.strategy.transmission_rate(agent.current_type)
-            eps = beta * n_infectious + loc.ambient_exposure()
+            eps = (beta * n_infectious + loc.ambient_exposure()) / self.TICKS_PER_DAY
             agent.update_health(eps)
 
         # Random disease-cloud generation (stochastic events)

@@ -63,10 +63,14 @@ class TUI:
 
     TICK_INTERVAL = 0.06   # seconds between auto-ticks when running
 
-    def __init__(self, stdscr, world: WorldEngine):
-        self.stdscr  = stdscr
-        self.world   = world
-        self.running = False   # auto-step mode
+    def __init__(self, stdscr, world: WorldEngine,
+                 ollama_error: str | None = None,
+                 ollama_client=None):
+        self.stdscr        = stdscr
+        self.world         = world
+        self.running       = False   # auto-step mode
+        self.ollama_error  = ollama_error
+        self.ollama_client = ollama_client
         self.scroll_agent = 0
         self.scroll_log   = 0
         self.agent_filter = "ALL"   # ALL | S | I | R
@@ -167,18 +171,26 @@ class TUI:
         w = self.world
         p.clear_draw()
 
+        # ── World clock widget (rows 1–2) ─────────────────────────────────
         day_pct = w.current_tick / w.TICKS_PER_DAY
         hour    = int(day_pct * 24)
         minute  = int((day_pct * 24 - hour) * 60)
-        # Day counter — shown prominently in top-centre of map panel
-        day_str = f" DAY {w.current_day:04d}  {hour:02d}:{minute:02d} "
-        p.safe_addstr(0, max(2, (p.w - len(day_str)) // 2),
-                      day_str,
-                      curses.color_pair(C_CYAN) | curses.A_BOLD)
+        t       = w.current_tick
+        if t < 72:    phase, ph_col = "SLEEPING ", C_BLUE
+        elif t < 84:  phase, ph_col = "COMMUTING", C_YELLOW
+        elif t < 192: phase, ph_col = "WORKING  ", C_CYAN
+        elif t < 204: phase, ph_col = "COMMUTING", C_YELLOW
+        elif t < 240: phase, ph_col = "SOCIAL   ", C_GREEN
+        else:         phase, ph_col = "EVENING  ", C_MAGENTA
+
+        clock_str = f" DAY {w.current_day:04d}    {hour:02d}:{minute:02d} "
+        p.safe_addstr(1, 2, clock_str, curses.color_pair(C_CYAN) | curses.A_BOLD)
+        p.safe_addstr(1, 2 + len(clock_str), phase,
+                      curses.color_pair(ph_col) | curses.A_BOLD)
         strategy_str = f" {w.strategy.name} "
-        p.safe_addstr(0, p.w - len(strategy_str) - 1,
-                      strategy_str,
-                      curses.color_pair(C_YELLOW))
+        p.safe_addstr(1, p.w - len(strategy_str) - 1,
+                      strategy_str, curses.color_pair(C_YELLOW))
+        p.safe_addstr(2, 1, "─" * (p.w - 2), curses.color_pair(C_WHITE))
 
         # Gather all locations with known grid positions
         locs = [l for l in w.locations.values()
@@ -190,11 +202,12 @@ class TUI:
         max_row = max(l.row for l in locs)
         max_col = max(l.col for l in locs)
 
-        cell_h = max(2, (p.h - 3) // (max_row + 1))
+        CLOCK_H = 2   # rows consumed by the clock widget above
+        cell_h = max(2, (p.h - 3 - CLOCK_H) // (max_row + 1))
         cell_w = max(6, (p.w - 2) // (max_col + 1))
 
         for loc in locs:
-            draw_r = 1 + loc.row * cell_h
+            draw_r = 1 + CLOCK_H + loc.row * cell_h
             draw_c = 1 + loc.col * cell_w
             if draw_r >= p.h - 1 or draw_c >= p.w - 1:
                 continue
