@@ -171,22 +171,38 @@ class CaseTable:
 
 class MimicCaseTable(CaseTable):
     """
-    Future extension: load real patient data from MIMIC-III/IV.
+    Case table backed by a MimicRecord (mock or real MIMIC data).
 
-    Expected CSV structure per subject:
-      subject_id, charttime (or day offset), HR, temp, RR, SpO2, ...
+    Populates self._data directly from chartevents — same get/band interface
+    as the synthetic CaseTable. Swap in MockMimicDatabase for development or
+    RealMimicDatabase for production; this class is unaffected.
 
-    The __init__ would:
-      1. Load the CSV for subject_id
-      2. Interpolate missing values
-      3. Populate self._data with real measurements
+    Usage:
+        from simulation.mimic_db import MockMimicDatabase
+        db  = MockMimicDatabase()
+        rec = db.random_subject("sepsis")
+        ct  = MimicCaseTable(rec, rng)
 
-    The rest (get, band) works identically.
+    When a variable is missing for a given day, the midpoint of its normal
+    range is used as a safe fallback.
     """
 
-    def __init__(self, subject_id: int, mimic_path: str, rng: random.Random):
-        raise NotImplementedError(
-            "MimicCaseTable not yet implemented.\n"
-            "Expected CSV columns: subject_id, day, HR, temp, RR, SpO2, "
-            "BP_sys, BP_dia, WBC, CRP, lactate, pain, fatigue, nausea"
-        )
+    def __init__(self, record, rng: random.Random):
+        # Bypass CaseTable.__init__ — populate _data from the record directly
+        self._trajectory = None   # unused for MIMIC records
+        self._rng        = rng
+        self._data       = self._load_from_record(record)
+
+    def _load_from_record(self, record) -> dict[str, list[float]]:
+        data: dict[str, list[float]] = {var: [] for var in NORMAL_RANGES}
+        for day in range(record.los_days):
+            vitals = record.vitals_at_day(day)
+            for var in NORMAL_RANGES:
+                lo, hi  = NORMAL_RANGES[var]
+                fallback = (lo + hi) / 2.0
+                data[var].append(vitals.get(var, fallback))
+        return data
+
+    # _severity_at_day is never called on MimicCaseTable — overridden for safety
+    def _severity_at_day(self, day: int) -> float:
+        return 0.0

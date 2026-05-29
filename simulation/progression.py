@@ -38,6 +38,10 @@ import math
 import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from simulation.mimic_db import MimicDatabase
 
 
 # ─── Trajectory ───────────────────────────────────────────────────────────────
@@ -51,14 +55,19 @@ class DiseaseTrajectory:
       Rising phase  (day < peak_day):  logistic approach to peak_severity
       Declining phase (day >= peak_day): exponential decay from peak
 
-    σ(t) = symptom_sensitivity × Δs   (finite difference, clipped to [0,1])
-    Negative Δs (improving) maps to σ = 0 — patient reports feeling better,
-    not a negative symptom value.
+    σ(t) = max(slope_component, floor_component)
+      slope_component = symptom_sensitivity × Δs  (high on upslope, 0 at plateau)
+      floor_component = severity_floor_weight × s(t)  (baseline from absolute severity)
+
+    The floor ensures σ > 0 at the plateau so agents at high severity still
+    report symptoms and seek care. Deadly/SlowBurn use a low floor (research
+    challenge: plateau is still hard to triage, just not completely silent).
     """
-    peak_severity:      float   # individual peak height
-    rise_days:          float   # days from day-0 to peak
-    decay_rate:         float   # daily fractional drop after peak
-    symptom_sensitivity: float  # σ = sensitivity × |Δs| on upslope
+    peak_severity:         float   # individual peak height
+    rise_days:             float   # days from day-0 to peak
+    decay_rate:            float   # daily fractional drop after peak
+    symptom_sensitivity:   float   # slope_component = sensitivity × Δs
+    severity_floor_weight: float = 0.25  # floor_component = weight × severity
 
     # Runtime state — updated by step()
     _day:          int   = 0
@@ -92,9 +101,10 @@ class DiseaseTrajectory:
 
         self._severity = max(0.0, min(1.0, self._severity))
 
-        # σ = sensitivity × Δs — positive only on upslope
         delta = self._severity - self._prev_severity
-        symptoms = max(0.0, min(1.0, self.symptom_sensitivity * delta))
+        slope_sig = max(0.0, self.symptom_sensitivity * delta)
+        floor_sig = self.severity_floor_weight * self._severity
+        symptoms  = min(1.0, max(slope_sig, floor_sig))
 
         return self._severity, symptoms
 
@@ -112,6 +122,16 @@ class DiseaseTrajectory:
     @property
     def cleared(self) -> bool:
         return self._at_peak and self._severity < 0.02
+
+    @property
+    def trend(self) -> str:
+        """Day-over-day severity direction — used for temporal symptom language."""
+        delta = self._severity - self._prev_severity
+        if delta > 0.015:
+            return "worsening"
+        elif delta < -0.015:
+            return "improving"
+        return "stable"
 
 
 # ─── Abstract base ────────────────────────────────────────────────────────────
@@ -156,10 +176,11 @@ class StandardFluProgression(DiseaseProgressionStrategy):
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
-            peak_severity       = self._sample(rng, 0.45, 0.10, 0.15, 0.75),
-            rise_days           = self._sample(rng, 3.0,  0.5,  1.5,  5.0),
-            decay_rate          = self._sample(rng, 0.18, 0.03, 0.08, 0.35),
-            symptom_sensitivity = self._sample(rng, 3.5,  0.5,  1.5,  6.0),
+            peak_severity         = self._sample(rng, 0.45, 0.10, 0.15, 0.75),
+            rise_days             = self._sample(rng, 3.0,  0.5,  1.5,  5.0),
+            decay_rate            = self._sample(rng, 0.18, 0.03, 0.08, 0.35),
+            symptom_sensitivity   = self._sample(rng, 3.5,  0.5,  1.5,  6.0),
+            severity_floor_weight = 0.25,
         )
 
 
@@ -173,10 +194,11 @@ class AggressiveFluProgression(DiseaseProgressionStrategy):
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
-            peak_severity       = self._sample(rng, 0.70, 0.08, 0.45, 0.92),
-            rise_days           = self._sample(rng, 2.5,  0.5,  1.0,  4.0),
-            decay_rate          = self._sample(rng, 0.07, 0.02, 0.03, 0.14),
-            symptom_sensitivity = self._sample(rng, 4.0,  0.5,  2.0,  7.0),
+            peak_severity         = self._sample(rng, 0.70, 0.08, 0.45, 0.92),
+            rise_days             = self._sample(rng, 2.5,  0.5,  1.0,  4.0),
+            decay_rate            = self._sample(rng, 0.07, 0.02, 0.03, 0.14),
+            symptom_sensitivity   = self._sample(rng, 4.0,  0.5,  2.0,  7.0),
+            severity_floor_weight = 0.22,
         )
 
 
@@ -190,36 +212,41 @@ class MildCoronaProgression(DiseaseProgressionStrategy):
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
-            peak_severity       = self._sample(rng, 0.25, 0.07, 0.08, 0.45),
-            rise_days           = self._sample(rng, 5.0,  1.0,  2.0,  9.0),
-            decay_rate          = self._sample(rng, 0.10, 0.02, 0.05, 0.20),
-            symptom_sensitivity = self._sample(rng, 2.5,  0.5,  1.0,  5.0),
+            peak_severity         = self._sample(rng, 0.25, 0.07, 0.08, 0.45),
+            rise_days             = self._sample(rng, 5.0,  1.0,  2.0,  9.0),
+            decay_rate            = self._sample(rng, 0.10, 0.02, 0.05, 0.20),
+            symptom_sensitivity   = self._sample(rng, 2.5,  0.5,  1.0,  5.0),
+            severity_floor_weight = 0.20,
         )
 
 
 class SlowBurnProgression(DiseaseProgressionStrategy):
     """
     Slow-progressing pathogen — moderate peak, very slow decay.
-    Severity stays high for weeks; plateau causes σ ≈ 0 despite
-    dangerous internal state. Hard to triage correctly.
+    Severity stays high for weeks. Low floor weight preserves the research
+    challenge: plateau symptoms are muted but not zero, so the LLM doctor
+    still receives a weak signal rather than complete silence.
     """
     name        = "Slow Burn"
     description = "Moderate peak, very slow decay — weeks-long illness."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
-            peak_severity       = self._sample(rng, 0.60, 0.10, 0.35, 0.85),
-            rise_days           = self._sample(rng, 6.0,  1.0,  3.0, 10.0),
-            decay_rate          = self._sample(rng, 0.03, 0.01, 0.01, 0.07),
-            symptom_sensitivity = self._sample(rng, 3.0,  0.5,  1.5,  5.5),
+            peak_severity         = self._sample(rng, 0.60, 0.10, 0.35, 0.85),
+            rise_days             = self._sample(rng, 6.0,  1.0,  3.0, 10.0),
+            decay_rate            = self._sample(rng, 0.03, 0.01, 0.01, 0.07),
+            symptom_sensitivity   = self._sample(rng, 3.0,  0.5,  1.5,  5.5),
+            severity_floor_weight = 0.15,
         )
 
 
 class DeadlyProgression(DiseaseProgressionStrategy):
     """
     Life-threatening disease — very high peak, near-zero decay rate.
-    Severity plateaus near top for an extended period; σ collapses to 0
-    at the plateau even though the patient is critically ill.
+    Severity plateaus near top for an extended period. The very low floor
+    weight (0.12) keeps the plateau signal muted — the patient reports
+    "not getting better" language rather than screaming severity — making
+    this the hardest triage case for the LLM doctor.
     Patient will NOT recover without treatment (hospitalisation or resolve).
     """
     name        = "Deadly"
@@ -227,55 +254,71 @@ class DeadlyProgression(DiseaseProgressionStrategy):
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
-            peak_severity       = self._sample(rng, 0.88, 0.05, 0.75, 0.99),
-            rise_days           = self._sample(rng, 2.0,  0.5,  1.0,  3.5),
-            decay_rate          = self._sample(rng, 0.01, 0.005, 0.002, 0.025),
-            symptom_sensitivity = self._sample(rng, 4.5,  0.5,  2.5,  7.0),
+            peak_severity         = self._sample(rng, 0.88, 0.05, 0.75, 0.99),
+            rise_days             = self._sample(rng, 2.0,  0.5,  1.0,  3.5),
+            decay_rate            = self._sample(rng, 0.01, 0.005, 0.002, 0.025),
+            symptom_sensitivity   = self._sample(rng, 4.5,  0.5,  2.5,  7.0),
+            severity_floor_weight = 0.12,
         )
 
 
-# ─── MIMIC stub — extension point ────────────────────────────────────────────
+# ─── MIMIC progression ────────────────────────────────────────────────────────
 
 class MimicProgression(DiseaseProgressionStrategy):
     """
-    MIMIC-III/IV dataset-driven progression — future extension point.
+    MIMIC-III/IV dataset-driven progression.
 
-    Contract:
-      Load a MIMIC cohort CSV with columns:
-        subject_id, day, severity_proxy (e.g. SOFA score normalised to [0,1])
+    Draws patient trajectories from a MimicDatabase (mock or real).
+    Returned trajectories are MimicDiseaseTrajectory objects backed by the
+    patient's severity_series from the database record.
 
-      sample_trajectory() should:
-        1. Draw a random subject_id from the cohort
-        2. Return a MimicTrajectory that wraps that patient's time series
-           and provides s(t) as a lookup rather than a computed curve
+    Usage with mock data (no MIMIC access needed):
+        from simulation.mimic_db import MockMimicDatabase
+        db   = MockMimicDatabase()
+        prog = MimicProgression(db, diagnosis_group="sepsis")
+        world = WorldEngine(progression_strategy=prog)
 
-      SymptomNarrator.followup_answer() will be extended to accept
-      per-variable measurements (HR, temp, SpO2, ...) mapped to language
-      bands independently, giving richer LLM doctor interactions.
+    Usage with real MIMIC (future):
+        db   = RealMimicDatabase("/path/to/mimic_csv/")
+        prog = MimicProgression(db, diagnosis_group="sepsis")
 
-    Raises NotImplementedError until dataset is loaded.
+    diagnosis_group: "sepsis" | "pneumonia" | "heart_failure" | None (any group).
     """
     name        = "MIMIC"
-    description = "MIMIC dataset-driven progression (not yet loaded)."
+    description = "MIMIC dataset-driven progression."
 
-    def __init__(self, dataset_path: str | None = None):
-        self._dataset_path = dataset_path
-        self._cohort       = None   # populated by load()
+    def __init__(
+        self,
+        database: Optional["MimicDatabase"] = None,
+        diagnosis_group: Optional[str] = None,
+        severity_floor_weight: float = 0.20,
+    ):
+        self._db            = database
+        self._group         = diagnosis_group
+        self._floor_weight  = severity_floor_weight
 
-    def load(self, path: str) -> None:
-        """Load and validate the MIMIC cohort CSV."""
-        raise NotImplementedError(
-            "MimicProgression.load() not yet implemented.\n"
-            "Expected CSV columns: subject_id, day, severity_proxy [0..1]"
-        )
+    def load(self, database: "MimicDatabase") -> None:
+        """Wire in a database after construction (mirrors the old API contract)."""
+        self._db = database
 
-    def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
-        raise NotImplementedError(
-            "MimicProgression requires a loaded dataset. Call load() first."
-        )
+    def sample_trajectory(self, rng: random.Random) -> "MimicDiseaseTrajectory":  # type: ignore[override]
+        if self._db is None:
+            raise RuntimeError(
+                "MimicProgression has no database. "
+                "Pass one at construction: MimicProgression(MockMimicDatabase()) "
+                "or call .load(db) before simulating."
+            )
+        from simulation.mimic_db import MimicDiseaseTrajectory
+        record = self._db.random_subject(self._group, rng)
+        return MimicDiseaseTrajectory(record, self._floor_weight)
 
 
 # ─── Registry ─────────────────────────────────────────────────────────────────
+
+def _make_mimic_mock() -> MimicProgression:
+    from simulation.mimic_db import MockMimicDatabase
+    return MimicProgression(MockMimicDatabase(), diagnosis_group=None)
+
 
 PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
     s.name: s for s in [
@@ -284,5 +327,6 @@ PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
         MildCoronaProgression(),
         SlowBurnProgression(),
         DeadlyProgression(),
+        _make_mimic_mock(),
     ]
 }

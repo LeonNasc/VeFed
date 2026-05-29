@@ -190,6 +190,7 @@ class WorldEngine:
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
                  progression_strategy: DiseaseProgressionStrategy | None = None):
+        self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
         self.progression: DiseaseProgressionStrategy = (
@@ -236,7 +237,11 @@ class WorldEngine:
         from simulation.case_table import CaseTable
         _traj = self.progression.sample_trajectory(self._rng)
         patient_zero.health_state.infect(_traj)
-        patient_zero._case_table = CaseTable(_traj, self._rng, max_days=30)
+        if hasattr(_traj, "_record"):
+            from simulation.case_table import MimicCaseTable
+            patient_zero._case_table = MimicCaseTable(_traj._record, self._rng)
+        else:
+            patient_zero._case_table = CaseTable(_traj, self._rng, max_days=90)
 
         # ── Subsystems ──────────────────────────────────────────────────
         self.current_tick: int         = 0
@@ -388,6 +393,13 @@ class WorldEngine:
             f"Day {self.current_day}: Progression → {strategy.name}"
         )
 
+    def attach_interaction_logger(self, logger) -> None:
+        """
+        Register an InteractionLogger.  Every processed DiagnosticEvent will
+        be serialised to the logger's JSONL file automatically.
+        """
+        self._interaction_logger = logger
+
     # ── Private helpers ──────────────────────────────────────────────────────
 
     def _end_of_day(self) -> None:
@@ -466,6 +478,11 @@ class WorldEngine:
             results, self.agents_by_id, self._hospital_id
         )
         self.event_log.extend(msgs)
+
+        logger = getattr(self, "_interaction_logger", None)
+        if logger is not None:
+            for ev in results:
+                logger.log(ev, day=self.current_day, seed=self._seed)
 
         # Write clinic details to log file
         clinic_today = [ev for ev in results if ev.oracle_label is not None]

@@ -115,6 +115,27 @@ class HealthState:
         return "R"
 
 
+# ─── InnerState ───────────────────────────────────────────────────────────────
+
+@dataclass
+class InnerState:
+    """
+    Snapshot of an agent's current clinical picture, used for rich symptom
+    narration. Combines HealthState (severity/σ), DiseaseTrajectory (trend),
+    CaseTable (vitals), and personality (mood).
+
+    Produced by Agent.inner_state; consumed by SymptomNarrator.full_opening_statement.
+    """
+    severity:       float          # actual disease severity s(t)
+    symptoms:       float          # σ(t) post-floor
+    days_infected:  int
+    trend:          str            # "worsening" | "stable" | "improving"
+    fatigue:        float          # 0–10 from CaseTable
+    pain:           float          # 0–10 from CaseTable
+    mood:           float          # 0–1; lower = more distressed
+    top_vital:      tuple | None   # (variable, value, band) most abnormal vital sign
+
+
 # ─── DiseaseCloud ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -296,27 +317,76 @@ class Agent:
                 from simulation.progression import StandardFluProgression
                 traj = StandardFluProgression().sample_trajectory(self._rng)
             self.health_state.infect(traj)
-            # Generate case table from trajectory
-            self._case_table = CaseTable(traj, self._rng, max_days=30)
+            # MIMIC trajectories carry their own vitals — use MimicCaseTable
+            if hasattr(traj, "_record"):
+                from simulation.case_table import MimicCaseTable
+                self._case_table = MimicCaseTable(traj._record, self._rng)
+            else:
+                # Synthetic trajectory: generate correlated vitals (90d covers Slow Burn / Deadly)
+                self._case_table = CaseTable(traj, self._rng, max_days=90)
             self.log.append("Contracted infection.")
             return True
         return False
 
     def should_seek_care(self) -> bool:
-        """Agent seeks care if perceived symptoms exceed threshold γ_a."""
-        return (
-            self.health_state.status == HealthStatus.INFECTED
-            and self.health_state.symptoms >= self.severity_threshold
-            and not self.hospitalised
-        )
+        """
+        Agent seeks care if perceived symptoms exceed threshold γ_a,
+        OR if severity is at or above the hospitalisation threshold (0.70).
+        The severity override prevents critically ill agents from silently
+        deteriorating at the plateau where σ is muted.
+        """
+        if self.hospitalised:
+            return False
+        hs = self.health_state
+        if hs.status not in (HealthStatus.INFECTED, HealthStatus.RECOVERING):
+            return False
+        if hs.status == HealthStatus.INFECTED and hs.severity >= 0.70:
+            return True
+        return hs.symptoms >= self.severity_threshold
 
     def reset_daily_exposure(self) -> None:
         self.cumulative_exposure = 0.0
 
+    @property
+    def inner_state(self) -> 'InnerState':
+        """Current clinical snapshot — feeds full_opening_statement."""
+        hs  = self.health_state
+        day = hs.days_infected
+        traj = hs._trajectory
+        trend = traj.trend if traj is not None else "stable"
+
+        fatigue    = 0.0
+        pain       = 0.0
+        top_vital  = None
+        if self._case_table is not None:
+            fatigue   = self._case_table.get("fatigue", day) or 0.0
+            pain      = self._case_table.get("pain",    day) or 0.0
+            top_vital = self._most_abnormal_vital(day)
+
+        # Mood: how distressed the agent feels — drives urgency language
+        _af = {Personality.STOIC: 0.35, Personality.NEUTRAL: 0.65, Personality.ANXIOUS: 1.15}
+        mood = max(0.0, min(1.0, 1.0 - hs.severity * _af.get(self.personality, 0.65)))
+
+        return InnerState(
+            severity=hs.severity, symptoms=hs.symptoms,
+            days_infected=day, trend=trend,
+            fatigue=fatigue, pain=pain, mood=mood, top_vital=top_vital,
+        )
+
+    def _most_abnormal_vital(self, day: int) -> tuple | None:
+        """Return (variable, value, band) for the most alarming vital today."""
+        priority = ["temp", "RR", "SpO2", "HR"]
+        for band_target in ("abnormal", "borderline"):
+            for var in priority:
+                b = self._case_table.band(var, day)
+                if b == band_target:
+                    return (var, self._case_table.get(var, day), b)
+        return None
+
     def opening_statement(self) -> str:
         """Natural-language symptom report for the LLM doctor."""
-        return self._narrator.opening_statement(
-            self.health_state.symptoms,
+        return self._narrator.full_opening_statement(
+            self.inner_state,
             self.health_state.days_infected,
             self.personality,
         )

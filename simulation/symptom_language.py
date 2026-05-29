@@ -310,6 +310,88 @@ VARIABLE_PHRASES = {
     },
 }
 
+# ─── Temporal trend phrases (appended to opening statement) ──────────────────
+
+TREND_ADDONS = {
+    "worsening": {
+        "STOIC":   ["though I notice it's not improving"],
+        "NEUTRAL": [
+            "and I'm getting worse, not better",
+            "and it seems to be escalating",
+            "and I feel more unwell than yesterday",
+        ],
+        "ANXIOUS": [
+            "and I'm really worried because it's getting worse",
+            "and it's escalating — I'm genuinely scared",
+            "and I'm deteriorating, I can feel it",
+        ],
+    },
+    "stable": {
+        "STOIC":   ["not getting better, not getting worse"],
+        "NEUTRAL": [
+            "and there's no sign of improvement",
+            "and it's been the same for a while now",
+        ],
+        "ANXIOUS": [
+            "and nothing is improving — I'm very worried",
+            "and I can't seem to shake it, which frightens me",
+        ],
+    },
+    "improving": {
+        "STOIC":   ["though it seems to be slowly resolving"],
+        "NEUTRAL": [
+            "though I think I'm slowly getting better",
+            "and it feels like it might be turning a corner",
+        ],
+        "ANXIOUS": [
+            "and I think I might be very slowly getting better, though I'm still worried",
+        ],
+    },
+}
+
+# ─── Specific vital mention phrases (appended after trend) ────────────────────
+
+VITAL_ADDONS = {
+    "temp": {
+        "abnormal":   [
+            "I have a very high fever.",
+            "My temperature is really elevated.",
+            "I'm burning up.",
+        ],
+        "borderline": [
+            "I have a slight fever.",
+            "I feel a bit warm, possibly mildly feverish.",
+        ],
+    },
+    "RR": {
+        "abnormal":   [
+            "I'm struggling to breathe.",
+            "Breathing is very laboured.",
+            "I can't catch my breath.",
+        ],
+        "borderline": [
+            "I'm a bit short of breath.",
+            "Breathing feels harder than normal.",
+        ],
+    },
+    "SpO2": {
+        "abnormal":   [
+            "I feel lightheaded and can't get enough air.",
+            "I think my oxygen might be low.",
+        ],
+        "borderline": ["I feel slightly faint when I move around."],
+    },
+    "HR": {
+        "abnormal":   [
+            "My heart is racing.",
+            "My pulse is pounding — I can feel it.",
+            "My heart won't slow down.",
+        ],
+        "borderline": ["My heart feels a little fast."],
+    },
+}
+
+
 PERSONALITY_PREFIX = {
     Personality.STOIC: [
         "I suppose ", "If I'm honest, ", "Well, ", "To be fair, ", "",
@@ -326,6 +408,28 @@ PERSONALITY_PREFIX = {
 
 # ─── SymptomNarrator ──────────────────────────────────────────────────────────
 
+def _severity_perceived_band(severity: float, personality: Personality) -> int:
+    """
+    Map absolute severity → language band, adjusted for personality.
+
+    Used by full_opening_statement so plateau patients still sound ill
+    (σ is near-zero at plateau but severity is high — language should reflect
+    actual sickness, not just rate of change).
+    """
+    if severity < 0.35:
+        base = 0
+    elif severity < 0.65:
+        base = 1
+    else:
+        base = 2
+
+    if personality == Personality.STOIC:
+        return max(0, base - 1)   # stoic downplays: high→medium, medium→low
+    elif personality == Personality.ANXIOUS:
+        return min(2, base + 1)   # anxious exaggerates: low→medium, medium→high
+    return base
+
+
 class SymptomNarrator:
     """Generates natural-language patient reports from case tables."""
 
@@ -338,6 +442,53 @@ class SymptomNarrator:
         phrases = OPENING_PHRASES[band]
         phrase  = self._rng.choice(phrases)
         return phrase.format(days=days)
+
+    def full_opening_statement(self, inner_state, days: int,
+                               personality: Personality) -> str:
+        """
+        Richer opening statement using InnerState.
+
+        Composed of three optional parts:
+          1. Base severity phrase — uses absolute severity (not σ) for banding
+             so plateau patients sound appropriately ill.
+          2. Temporal trend — appended ~65 % of the time (more for anxious,
+             less for stoic).
+          3. Most abnormal vital — appended ~50 % of the time if one exists.
+
+        The LLM doctor still must work from this language; severity is not
+        exposed numerically. The challenge comes from personality distortion,
+        the plateau (severity high but trends "stable"), and vague vital phrasing.
+        """
+        band   = _severity_perceived_band(inner_state.severity, personality)
+        base   = self._rng.choice(OPENING_PHRASES[band]).format(days=days)
+        parts  = [base]
+
+        # Trend addon
+        p_trend = {
+            Personality.STOIC:   0.35,
+            Personality.NEUTRAL: 0.65,
+            Personality.ANXIOUS: 0.85,
+        }.get(personality, 0.65)
+        if self._rng.random() < p_trend:
+            pkey = personality.value.upper()
+            addon_pool = TREND_ADDONS.get(inner_state.trend, {}).get(pkey, [])
+            if addon_pool:
+                addon = self._rng.choice(addon_pool)
+                # Join naturally: first letter lowercase, prepend comma
+                if addon and addon[0].islower():
+                    parts[-1] = parts[-1].rstrip(".")
+                    parts.append(", " + addon + ".")
+                else:
+                    parts.append(addon)
+
+        # Vital addon
+        if inner_state.top_vital and self._rng.random() < 0.50:
+            var, _val, band_str = inner_state.top_vital
+            phrases = VITAL_ADDONS.get(var, {}).get(band_str, [])
+            if phrases:
+                parts.append(" " + self._rng.choice(phrases))
+
+        return "".join(parts)
 
     def report_variable(self, variable: str, value: float, band: str,
                         personality: Personality, force_measured: bool = False) -> str:
