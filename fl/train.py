@@ -141,7 +141,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             **{k: v for k, v in asdict(cfg).items()
                if not k.startswith("wandb_")},
         },
-        reinit  = True,
+        reinit  = "finish_previous",
     )
 
     # ── End condition — one instance per silo (each has independent state) ────
