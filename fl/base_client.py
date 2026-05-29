@@ -102,10 +102,15 @@ class WorldFLClient:
             labels.append(label)
         return texts, labels
 
-    def train_on_events(self, events: list) -> int:
+    def train_on_events(self, events: list) -> tuple[int, list[float]]:
         """
         Fine-tune LoRA adapter on collected events.
-        Returns number of training examples used.
+
+        Returns
+        -------
+        (num_examples, epoch_losses)
+            num_examples : training pairs used
+            epoch_losses : mean loss per epoch (empty list if no data)
         """
         import torch
         from torch.optim import AdamW
@@ -114,7 +119,7 @@ class WorldFLClient:
 
         texts, labels = self._build_dataset(events)
         if not texts:
-            return 0
+            return 0, []
 
         tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
         enc = tokenizer(
@@ -133,18 +138,22 @@ class WorldFLClient:
             lr=self.lr,
         )
 
+        epoch_losses: list[float] = []
         for _ in range(self.local_epochs):
+            batch_losses = []
             for input_ids, attn_mask, batch_labels in loader:
                 optimizer.zero_grad()
-                loss = model(
+                out = model(
                     input_ids=input_ids,
                     attention_mask=attn_mask,
                     labels=batch_labels,
-                ).loss
-                loss.backward()
+                )
+                out.loss.backward()
                 optimizer.step()
+                batch_losses.append(float(out.loss))
+            epoch_losses.append(sum(batch_losses) / len(batch_losses))
 
-        return len(texts)
+        return len(texts), epoch_losses
 
     # ── Weight I/O ─────────────────────────────────────────────────────────────
 
@@ -195,11 +204,26 @@ class WorldFLClient:
 
     def run_round(self) -> dict:
         """
-        One complete FL round: simulate → train → return metrics.
-        Convenience wrapper used in standalone / testing mode.
+        One complete FL round: simulate → train → evaluate → return metrics.
+
+        Returned dict keys
+        ------------------
+        loss, accuracy, num_examples   — post-training eval on this round's events
+        trained_on                     — examples used for training
+        num_events                     — raw events collected this round
+        epoch_losses                   — per-epoch mean training loss list
+        sir_s, sir_i, sir_r            — SIR state after this round's simulation
         """
         events = self.run_simulation_round()
-        n = self.train_on_events(events)
+        n, epoch_losses = self.train_on_events(events)
         metrics = self.evaluate(events)
-        metrics["trained_on"] = n
+        sir = self.world.sir_model
+        metrics.update(
+            trained_on   = n,
+            num_events   = len(events),
+            epoch_losses = epoch_losses,
+            sir_s        = sir.S,
+            sir_i        = sir.I,
+            sir_r        = sir.R,
+        )
         return metrics

@@ -12,6 +12,10 @@ accelerate>=0.29         # required by PEFT / transformers trainer
 matplotlib>=3.8
 numpy>=1.26
 scikit-learn>=1.4        # PCA for embedding scatter plots
+pygame>=2.5              # town visualisation (python main.py --pygame)
+
+# ── Experiment tracking ───────────────────────────────────────────────────────
+wandb>=0.18
 
 # ── Optional: MIMIC dataset processing ───────────────────────────────────────
 # pandas>=2.0

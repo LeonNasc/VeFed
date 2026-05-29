@@ -29,13 +29,17 @@ from __future__ import annotations
 from fl.base_client import WorldFLClient
 
 
-def make_flower_client(client: WorldFLClient):
+def make_flower_client(client: WorldFLClient, cid: str = "0"):
     """
     Wrap a WorldFLClient as a Flower NumPyClient.
 
     get_parameters : return current LoRA adapter weights
-    fit            : load global weights → simulate → train → return updated weights
-    evaluate       : load global weights → evaluate → return loss + accuracy
+    fit            : load global weights → simulate → train → return weights + metrics
+    evaluate       : load global weights → evaluate → return loss + metrics
+
+    Metrics returned from fit() (accessible in WandBFedAvg.aggregate_fit):
+      loss, accuracy, num_examples, trained_on, num_events,
+      train_loss_final, sir_s, sir_i, sir_r, silo_id
     """
     try:
         import flwr as fl
@@ -50,14 +54,30 @@ def make_flower_client(client: WorldFLClient):
 
         def fit(self, parameters, config):
             client.set_weights(parameters)
-            events = client.run_simulation_round()
-            n = client.train_on_events(events)
-            return client.get_weights(), n, {}
+            m = client.run_round()
+            epoch_losses = m.pop("epoch_losses", [])
+            metrics = {
+                k: float(v) if isinstance(v, float) else int(v)
+                for k, v in m.items()
+                if isinstance(v, (int, float))
+            }
+            if epoch_losses:
+                metrics["train_loss_final"] = float(epoch_losses[-1])
+            metrics["silo_id"] = int(cid)
+            return client.get_weights(), metrics.get("num_examples", 0), metrics
 
         def evaluate(self, parameters, config):
             client.set_weights(parameters)
             m = client.evaluate()
-            return m["loss"], m["num_examples"], {"accuracy": m["accuracy"]}
+            sir = client.world.sir_model
+            extra = {
+                "accuracy": float(m["accuracy"]),
+                "sir_s":    int(sir.S),
+                "sir_i":    int(sir.I),
+                "sir_r":    int(sir.R),
+                "silo_id":  int(cid),
+            }
+            return float(m["loss"]), m["num_examples"], extra
 
     return _WorldFlowerClient()
 
