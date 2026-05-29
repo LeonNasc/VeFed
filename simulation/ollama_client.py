@@ -129,9 +129,14 @@ class OllamaDiagnosticClient:
                 event.oracle_label = parsed.get("label", "unknown")
                 event.diagnosis    = parsed.get("diagnosis", "")[:100]
                 event.notes        = parsed.get("notes", "")[:160]
+                action_str = parsed.get("action", "unknown").replace("_", " ")
                 event.conversation.append({
                     "role": "doctor",
-                    "text": f"[{event.oracle_label}] {event.notes}",
+                    "text": (
+                        f"Diagnosis: {event.diagnosis}. "
+                        f"Outcome: {action_str} ({event.oracle_label}). "
+                        f"{event.notes}"
+                    ),
                 })
                 break
 
