@@ -240,15 +240,18 @@ class WorldEngine:
             self.agents_by_id[agent.id] = agent
 
         # ── Seed initial infections ─────────────────────────────────────
-        patient_zero = self._rng.choice(self.agents)
+        # 3 seeds: reduces stochastic extinction probability from ~50% to ~10%
+        # when R0 ≈ 2 and incubation suppresses early transmission.
         from simulation.case_table import CaseTable
-        _traj = self.progression.sample_trajectory(self._rng)
-        patient_zero.health_state.infect(_traj)
-        if hasattr(_traj, "_record"):
-            from simulation.case_table import MimicCaseTable
-            patient_zero._case_table = MimicCaseTable(_traj._record, self._rng)
-        else:
-            patient_zero._case_table = CaseTable(_traj, self._rng, max_days=90)
+        seed_agents = self._rng.sample(self.agents, min(3, len(self.agents)))
+        for seed_agent in seed_agents:
+            _traj = self.progression.sample_trajectory(self._rng)
+            seed_agent.health_state.infect(_traj)
+            if hasattr(_traj, "_record"):
+                from simulation.case_table import MimicCaseTable
+                seed_agent._case_table = MimicCaseTable(_traj._record, self._rng)
+            else:
+                seed_agent._case_table = CaseTable(_traj, self._rng, max_days=90)
 
         # ── Subsystems ──────────────────────────────────────────────────
         self.current_tick: int         = 0
@@ -278,8 +281,8 @@ class WorldEngine:
             f"# agents={num_agents}  seed={seed}\n\n"
         )
 
-        # Inject an initial disease cloud at patient zero's location
-        self.inject_disease_cloud(patient_zero.current_location, intensity=0.4)
+        # Inject an initial disease cloud at the first seed's location
+        self.inject_disease_cloud(seed_agents[0].current_location, intensity=0.4)
 
         # Sync initial SIR
         self.sir_model.step(self.agents)
@@ -326,10 +329,11 @@ class WorldEngine:
             # prevalence rather than absolute infectious count — prevents
             # explosive spread in small bounded populations where density-
             # dependent β diverges from the intended population-level rate.
+            # Only post-incubation agents count as infectious.
             n_present    = len(loc.agents_present)
             n_infectious = sum(
                 1 for aid in loc.agents_present
-                if self.agents_by_id[aid].status == HealthStatus.INFECTED
+                if self.agents_by_id[aid].is_infectious
             )
             prevalence = n_infectious / n_present if n_present > 0 else 0.0
             beta = self.BASE_BETA * self.strategy.transmission_rate(agent.current_type)

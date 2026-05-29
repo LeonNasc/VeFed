@@ -154,14 +154,18 @@ class CaseTable:
         This mirrors DiseaseTrajectory.step() logic without actually stepping.
         """
         t = self._trajectory
-        if day < t.rise_days:
+        incubation = getattr(t, 'incubation_days', 0)
+        if day <= incubation:
+            return 0.0
+        effective_day = day - incubation
+        if effective_day < t.rise_days:
             # Logistic rise
             k = 6.0 / max(t.rise_days, 1.0)
             t_half = t.rise_days / 2.0
-            s = t.peak_severity / (1.0 + math.exp(-k * (day - t_half)))
+            s = t.peak_severity / (1.0 + math.exp(-k * (effective_day - t_half)))
         else:
             # Exponential decay
-            days_past_peak = day - t.rise_days
+            days_past_peak = effective_day - t.rise_days
             s = t.peak_severity * ((1.0 - t.decay_rate) ** days_past_peak)
         return max(0.0, min(1.0, s))
 

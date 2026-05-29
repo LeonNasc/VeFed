@@ -446,6 +446,16 @@ class Agent:
         return self.health_state.status
 
     @property
+    def is_infectious(self) -> bool:
+        """True only after the incubation period has elapsed."""
+        if self.health_state.status != HealthStatus.INFECTED:
+            return False
+        traj = self.health_state._trajectory
+        if traj is None:
+            return False
+        return self.health_state.days_infected > traj.incubation_days
+
+    @property
     def display_char(self) -> str:
         return {
             HealthStatus.SUSCEPTIBLE: "·",

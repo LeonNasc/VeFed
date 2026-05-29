@@ -74,6 +74,7 @@ class DiseaseTrajectory:
     severity_floor_weight: float = 0.25  # floor_component = weight × severity
     disease_name:          str   = "unknown"  # human-readable; set by strategy
     icd_code:              str   = "B99.9"    # ICD-10 training target; set by strategy
+    incubation_days:       int   = 0          # days post-infection with no symptoms or transmission
     # Per-variable vital multipliers — scales SEVERITY_SLOPES for this disease.
     # Keys match NORMAL_RANGES in case_table.py.  Missing keys default to 1.0.
     # These make each disease clinically distinguishable in CaseTable vitals and
@@ -94,6 +95,14 @@ class DiseaseTrajectory:
         self._prev_severity = self._severity
         self._day += 1
 
+        if self._day <= self.incubation_days:
+            # Latent/incubation phase — no symptoms, no infectiousness
+            self._severity = 0.0
+            return 0.0, 0.0
+
+        # Logistic rise / exponential decay measured from end of incubation
+        effective_day = self._day - self.incubation_days
+
         if not self._at_peak:
             # Logistic rise: s approaches peak_severity with rate k
             # s(t) = peak / (1 + exp(-k*(t - t_half)))
@@ -101,9 +110,9 @@ class DiseaseTrajectory:
             k = 6.0 / max(self.rise_days, 1.0)   # steepness
             t_half = self.rise_days / 2.0
             self._severity = self.peak_severity / (
-                1.0 + math.exp(-k * (self._day - t_half))
+                1.0 + math.exp(-k * (effective_day - t_half))
             )
-            if self._day >= self.rise_days:
+            if effective_day >= self.rise_days:
                 self._at_peak  = True
                 self._severity = self.peak_severity
         else:
@@ -192,6 +201,7 @@ class StandardFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.25,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 2,   # 1-4 d; 2 d typical for influenza
             # Fever-dominant: high temp + HR, SpO2 largely preserved
             vital_slopes = {"temp": 1.8, "HR": 1.3, "CRP": 1.5,
                             "SpO2": 0.4, "RR":  0.7, "BP_sys": 0.9},
@@ -213,6 +223,7 @@ class AggressiveFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.22,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 1,   # aggressive strain — short incubation
             # Viral pneumonia: high fever + significant respiratory compromise
             vital_slopes = {"temp": 2.0, "HR": 1.5, "CRP": 2.5, "WBC": 2.0,
                             "SpO2": 2.0, "RR":  1.8, "BP_sys": 1.2},
@@ -245,6 +256,7 @@ class PersistentFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.25,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 2,
             # Sustained flu: moderate fever + mild SpO2 compromise, prolonged inflammation
             vital_slopes = {"temp": 1.5, "HR": 1.2, "CRP": 1.8, "WBC": 1.2,
                             "SpO2": 0.8, "RR":  1.0, "BP_sys": 0.9},
@@ -266,6 +278,7 @@ class MildCoronaProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.20,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 4,   # SARS-CoV-2-like: 4-6 d median
             # Silent hypoxia: notable SpO2 drop with low fever (the clinical puzzle)
             vital_slopes = {"SpO2": 1.8, "temp": 0.5, "HR": 0.8, "RR": 1.0,
                             "WBC": 0.6, "CRP": 1.2, "fatigue": 2.0},
@@ -290,6 +303,7 @@ class SlowBurnProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.15,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 4,   # slow-onset sepsis: subtle prodrome
             # Sepsis pattern: circulatory failure — high lactate, BP drops,
             # compensatory tachycardia; fever unreliable (can be absent or low)
             vital_slopes = {"lactate": 4.0, "BP_sys": 2.5, "HR": 2.0, "RR": 1.5,
@@ -315,6 +329,7 @@ class DeadlyProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.12,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            incubation_days       = 1,   # acute pneumonia: rapid onset
             # Respiratory failure: severe SpO2 drop + high RR are the defining signs;
             # septic physiology with BP drop and tachycardia at severe stages
             vital_slopes = {"SpO2": 3.0, "RR": 2.5, "BP_sys": 1.5, "HR": 1.5,
