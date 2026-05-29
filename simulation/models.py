@@ -413,29 +413,29 @@ class Agent:
         )
 
     def build_diagnostic_event(self) -> DiagnosticEvent:
-        s    = self.health_state.severity
         traj = self.health_state._trajectory
+        day  = self.health_state.days_infected
+        icd  = getattr(traj, "icd_code", "B99.9")
 
-        # ICD-10 code from the trajectory (set at infection time by the strategy)
-        icd = getattr(traj, "icd_code", "B99.9")
-
-        # Management tier driven purely by severity (inner state)
-        if s >= 0.70:
-            management = "hospitalise"
-        elif s >= 0.40:
-            management = "treat"
+        # Management tier derived from disease-specific vital signs via NEWS2 scoring.
+        # This makes the ground-truth label clinically grounded: pneumonia and sepsis
+        # score high even at moderate internal severity; flu at the same severity may
+        # only require home rest because SpO2 and BP are largely preserved.
+        if self._case_table is not None:
+            from simulation.case_table import management_from_vitals
+            management = management_from_vitals(self._case_table, day)
         else:
-            management = "home rest"
+            # Fallback: severity float threshold (agents infected before case table init)
+            s = self.health_state.severity
+            management = "hospitalise" if s >= 0.70 else "treat" if s >= 0.40 else "home rest"
 
-        # Combined label: the doctor must identify the right disease AND recommend
-        # the correct management.  Accuracy is scored hierarchically on the ICD part.
         gt = f"{icd} / {management}"
 
         return DiagnosticEvent(
             agent_id      = self.id,
             severity      = self.health_state.severity,
             symptoms      = self.health_state.symptoms,
-            days_infected = self.health_state.days_infected,
+            days_infected = day,
             personality   = self.personality,
             case_table    = self._case_table,
             ground_truth  = gt,

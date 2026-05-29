@@ -42,7 +42,7 @@ WALL_CHAR: dict[LocationType, str] = {
 
 GLYPH_POOL = string.ascii_lowercase + string.digits + string.ascii_uppercase
 
-SIDEBAR_W = 26
+SIDEBAR_W = 36
 
 
 def _phase(tick: int) -> tuple[str, int]:
@@ -229,7 +229,7 @@ class RogueTUI:
         phase, ph_color = _phase(t)
 
         row = 0
-        self._str(row,     col, "── CLOCK ──────────────",
+        self._str(row,     col, "── CLOCK ──────────────────────",
                   curses.color_pair(C_CYAN) | curses.A_BOLD)
         self._str(row + 1, col, f"DAY {w.current_day:04d}   {hour:02d}:{minute:02d}",
                   curses.color_pair(C_CYAN) | curses.A_BOLD)
@@ -239,7 +239,7 @@ class RogueTUI:
 
         # ── SIR stats ─────────────────────────────────────────────────────
         total = max(1, sir.total)
-        self._str(row,     col, "── SIR ────────────────",
+        self._str(row,     col, "── SIR ────────────────────────",
                   curses.color_pair(C_CYAN) | curses.A_BOLD)
         self._str(row + 1, col, f"S: {sir.S:3d}  ({sir.S/total*100:4.1f}%)",
                   curses.color_pair(C_GREEN))
@@ -251,8 +251,11 @@ class RogueTUI:
                   curses.color_pair(C_MAGENTA))
         row += 6
 
+        # ── Clinic / last consultation ────────────────────────────────────
+        row = self._draw_clinic_section(row, col)
+
         # ── Legend ────────────────────────────────────────────────────────
-        self._str(row,     col, "── LEGEND ─────────────",
+        self._str(row,     col, "── LEGEND ─────────────────────",
                   curses.color_pair(C_CYAN) | curses.A_BOLD)
         self._str(row + 1, col, "green  = susceptible",  curses.color_pair(C_GREEN))
         self._str(row + 2, col, "red    = infected",     curses.color_pair(C_RED) | curses.A_BOLD)
@@ -262,7 +265,7 @@ class RogueTUI:
         row += 7
 
         # ── Event log ─────────────────────────────────────────────────────
-        self._str(row, col, "── EVENT LOG ──────────",
+        self._str(row, col, "── EVENT LOG ──────────────────",
                   curses.color_pair(C_CYAN) | curses.A_BOLD)
         log_rows = self._map_h - row - 2
         if log_rows > 0:
@@ -282,6 +285,52 @@ class RogueTUI:
         if self.ollama_error:
             self._str(self._map_h - 1, col, "Ollama offline",
                       curses.color_pair(C_RED))
+
+    # ── Clinic section (last consultation) ───────────────────────────────────
+
+    def _draw_clinic_section(self, row: int, col: int) -> int:
+        """Draw last patient/doctor conversation in sidebar; returns next row."""
+        w         = self.world
+        processed = w.clinic_queue.processed
+        text_w    = SIDEBAR_W - 2
+
+        self._str(row, col, "── CLINIC ──────────────────────",
+                  curses.color_pair(C_MAGENTA) | curses.A_BOLD)
+        row += 1
+
+        if not processed:
+            self._str(row, col, "no cases yet", curses.color_pair(C_WHITE))
+            return row + 2
+
+        ev         = processed[-1]
+        ag         = w.agents_by_id.get(ev.agent_id)
+        name       = (ag.name if ag else ev.agent_id)[:16]
+        action_str = ev.action.value if ev.action else "pending"
+        label_str  = ev.oracle_label or "?"
+
+        if action_str == "hospitalise":
+            out_attr = curses.color_pair(C_RED) | curses.A_BOLD
+        elif action_str == "resolve":
+            out_attr = curses.color_pair(C_YELLOW)
+        else:
+            out_attr = curses.color_pair(C_GREEN)
+
+        self._str(row, col, f"{name} | {label_str} → {action_str}"[:text_w], out_attr)
+        row += 1
+
+        for turn in ev.conversation:
+            role   = turn.get("role", "?")
+            text   = turn.get("text", "")
+            prefix = "[P] " if role == "patient" else "[D] "
+            attr   = (curses.color_pair(C_GREEN) if role == "patient"
+                      else curses.color_pair(C_CYAN))
+            line   = (prefix + text)[:text_w]
+            self._str(row, col, line, attr)
+            row += 1
+            if row >= self._map_h - 14:   # leave room for legend + event log
+                break
+
+        return row + 1   # spacer
 
     # ── Status bar ───────────────────────────────────────────────────────────
 

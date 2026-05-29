@@ -56,13 +56,21 @@ class OllamaDiagnosticClient:
     """
     Multi-turn Ollama doctor. Blocks until the full conversation completes.
     Conversation is recorded on DiagnosticEvent.conversation as [{role, text}].
+
+    Ollama runs as a single detached server; this client is one shared handle
+    across all WorldEngine silos — no per-silo instances needed.
+
+    Few-shot learning: call update_examples() after each FL round to inject
+    the best past conversations as prior context.  The model then sees proven
+    correct exchanges before each new patient, improving speed and accuracy.
     """
 
     def __init__(self, model: str = MODEL, url: str = OLLAMA_URL,
                  timeout: int = TIMEOUT_SEC):
-        self.model   = model
-        self.url     = url
-        self.timeout = timeout
+        self.model    = model
+        self.url      = url
+        self.timeout  = timeout
+        self._examples: list[dict] = []   # few-shot examples, updated each FL round
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -123,6 +131,65 @@ class OllamaDiagnosticClient:
 
         return event
 
+    def update_examples(self, events: list, max_per_tier: int = 2) -> None:
+        """
+        Refresh the few-shot example bank from a batch of processed DiagnosticEvents.
+
+        Selects up to max_per_tier correct conversations per management tier
+        (home rest / treat / hospitalise), ordered by fewest turns.  Correct =
+        doctor's action matches the oracle management in ground_truth.
+
+        Call this after each FL round so the doctor improves progressively.
+        """
+        import json
+        from simulation.models import DiagnosticAction
+
+        mgmt_to_action = {
+            "home rest":   DiagnosticAction.RECOVER,
+            "treat":       DiagnosticAction.RESOLVE,
+            "hospitalise": DiagnosticAction.HOSPITALISE,
+        }
+
+        by_tier: dict[str, list[tuple[int, dict]]] = {t: [] for t in mgmt_to_action}
+
+        for ev in events:
+            if not ev.ground_truth or not ev.action or not ev.conversation:
+                continue
+            parts = ev.ground_truth.rsplit(" / ", 1)
+            if len(parts) != 2:
+                continue
+            expected = mgmt_to_action.get(parts[1])
+            if expected != ev.action:
+                continue   # incorrect diagnosis — not a useful example
+
+            patient_turns = [t["text"] for t in ev.conversation if t["role"] == "patient"]
+            if not patient_turns:
+                continue
+
+            # Reconstruct the doctor JSON from stored fields
+            doctor_json = json.dumps({
+                "type":      "decision",
+                "action":    ev.action.value,
+                "label":     ev.oracle_label or "unknown",
+                "diagnosis": ev.diagnosis or "",
+                "notes":     ev.notes or "",
+            })
+
+            n_turns = len(ev.conversation)
+            by_tier[parts[1]].append((n_turns, {
+                "patient":     patient_turns[0],
+                "doctor_json": doctor_json,
+            }))
+
+        # Pick the shortest correct conversation per tier for diversity
+        self._examples = []
+        for tier_examples in by_tier.values():
+            tier_examples.sort(key=lambda x: x[0])
+            self._examples.extend(ex for _, ex in tier_examples[:max_per_tier])
+
+    def num_examples(self) -> int:
+        return len(self._examples)
+
     def health_check(self) -> bool:
         try:
             req = urllib.request.Request(
@@ -140,10 +207,15 @@ class OllamaDiagnosticClient:
             (t["text"] for t in event.conversation if t["role"] == "patient"),
             "I am not feeling well.",
         )
-        return [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": opening},
-        ]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # Inject accumulated few-shot examples as prior conversation turns.
+        # The model sees proven correct exchanges before each new patient,
+        # learning to decide faster and with better calibration over FL rounds.
+        for ex in self._examples:
+            messages.append({"role": "user",      "content": ex["patient"]})
+            messages.append({"role": "assistant", "content": ex["doctor_json"]})
+        messages.append({"role": "user", "content": opening})
+        return messages
 
     def _call_ollama(self, messages: list[dict]) -> str:
         payload = json.dumps({

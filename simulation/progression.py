@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 import random
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -74,6 +74,11 @@ class DiseaseTrajectory:
     severity_floor_weight: float = 0.25  # floor_component = weight × severity
     disease_name:          str   = "unknown"  # human-readable; set by strategy
     icd_code:              str   = "B99.9"    # ICD-10 training target; set by strategy
+    # Per-variable vital multipliers — scales SEVERITY_SLOPES for this disease.
+    # Keys match NORMAL_RANGES in case_table.py.  Missing keys default to 1.0.
+    # These make each disease clinically distinguishable in CaseTable vitals and
+    # in the NEWS2-based ground-truth management decision.
+    vital_slopes: dict = field(default_factory=dict)
 
     # Runtime state — updated by step()
     _day:          int   = 0
@@ -187,6 +192,9 @@ class StandardFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.25,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Fever-dominant: high temp + HR, SpO2 largely preserved
+            vital_slopes = {"temp": 1.8, "HR": 1.3, "CRP": 1.5,
+                            "SpO2": 0.4, "RR":  0.7, "BP_sys": 0.9},
         )
 
 
@@ -205,6 +213,9 @@ class AggressiveFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.22,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Viral pneumonia: high fever + significant respiratory compromise
+            vital_slopes = {"temp": 2.0, "HR": 1.5, "CRP": 2.5, "WBC": 2.0,
+                            "SpO2": 2.0, "RR":  1.8, "BP_sys": 1.2},
         )
 
 
@@ -234,6 +245,9 @@ class PersistentFluProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.25,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Sustained flu: moderate fever + mild SpO2 compromise, prolonged inflammation
+            vital_slopes = {"temp": 1.5, "HR": 1.2, "CRP": 1.8, "WBC": 1.2,
+                            "SpO2": 0.8, "RR":  1.0, "BP_sys": 0.9},
         )
 
 
@@ -252,6 +266,9 @@ class MildCoronaProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.20,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Silent hypoxia: notable SpO2 drop with low fever (the clinical puzzle)
+            vital_slopes = {"SpO2": 1.8, "temp": 0.5, "HR": 0.8, "RR": 1.0,
+                            "WBC": 0.6, "CRP": 1.2, "fatigue": 2.0},
         )
 
 
@@ -273,6 +290,10 @@ class SlowBurnProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.15,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Sepsis pattern: circulatory failure — high lactate, BP drops,
+            # compensatory tachycardia; fever unreliable (can be absent or low)
+            vital_slopes = {"lactate": 4.0, "BP_sys": 2.5, "HR": 2.0, "RR": 1.5,
+                            "WBC": 2.5, "CRP": 3.0, "SpO2": 1.2, "temp": 0.4},
         )
 
 
@@ -294,6 +315,10 @@ class DeadlyProgression(DiseaseProgressionStrategy):
             severity_floor_weight = 0.12,
             disease_name          = self.name,
             icd_code              = self.icd_code,
+            # Respiratory failure: severe SpO2 drop + high RR are the defining signs;
+            # septic physiology with BP drop and tachycardia at severe stages
+            vital_slopes = {"SpO2": 3.0, "RR": 2.5, "BP_sys": 1.5, "HR": 1.5,
+                            "WBC": 2.0, "CRP": 2.0, "temp": 1.0},
         )
 
 

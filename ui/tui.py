@@ -15,9 +15,12 @@ Layout (four panes):
 └────────────────────────────────────────────┘
 """
 from __future__ import annotations
+import csv
 import curses
 import time
-from simulation.models import HealthStatus, LocationType
+from datetime import datetime
+from pathlib import Path
+from simulation.models import DiagnosticAction, HealthStatus, LocationType
 from simulation.world import WorldEngine
 from simulation.strategies import STRATEGIES
 
@@ -71,13 +74,15 @@ class TUI:
         self.running       = False   # auto-step mode
         self.ollama_error  = ollama_error
         self.ollama_client = ollama_client
-        self.scroll_agent = 0
-        self.scroll_log   = 0
-        self.agent_filter = "ALL"   # ALL | S | I | R
-        self._last_tick_time = 0.0
-        self._clinic_msgs: list[str] = []
-        self._strategy_names = list(STRATEGIES.keys())
-        self._strategy_idx   = 0
+        self.scroll_agent     = 0
+        self.scroll_log       = 0
+        self.scroll_clinic    = 0
+        self._clinic_case_idx = -1   # -1 = always show latest
+        self.agent_filter     = "ALL"   # ALL | S | I | R
+        self._last_tick_time  = 0.0
+        self._strategy_names  = list(STRATEGIES.keys())
+        self._strategy_idx    = 0
+        self._export_summary: str = ""
         self._build_layout()
 
     # ── Layout ───────────────────────────────────────────────────────────────
@@ -109,6 +114,7 @@ class TUI:
             key = self.stdscr.getch()
 
             if key in (ord('q'), ord('Q')):
+                self._export_session()
                 break
             elif key == ord(' '):
                 self.world.step_tick()
@@ -138,11 +144,29 @@ class TUI:
                 self.world.set_disease_strategy(STRATEGIES[name])
 
             elif key in (ord('d'), ord('D')):
-                # Inject cloud at random location
                 import random
                 loc = random.choice(list(self.world.locations.values()))
                 self.world.inject_disease_cloud(loc.id, 0.6)
                 self.world.event_log.append(f"Manual cloud → {loc.id}")
+            elif key in (ord('j'), ord('J')):
+                self.scroll_clinic += 1
+            elif key in (ord('k'), ord('K')):
+                self.scroll_clinic = max(0, self.scroll_clinic - 1)
+            elif key == ord(','):
+                processed = self.world.clinic_queue.processed
+                if processed:
+                    n   = len(processed)
+                    cur = self._clinic_case_idx if self._clinic_case_idx != -1 else n - 1
+                    self._clinic_case_idx = max(0, cur - 1)
+                    self.scroll_clinic = 0
+            elif key == ord('.'):
+                processed = self.world.clinic_queue.processed
+                if processed:
+                    n   = len(processed)
+                    cur = self._clinic_case_idx if self._clinic_case_idx != -1 else n - 1
+                    nxt = cur + 1
+                    self._clinic_case_idx = nxt if nxt < n - 1 else -1
+                    self.scroll_clinic = 0
 
             # Auto-tick
             if self.running:
@@ -347,47 +371,104 @@ class TUI:
     # ── Clinic panel ─────────────────────────────────────────────────────────
 
     def _draw_clinic(self) -> None:
-        p     = self.p_clinic
-        queue = self.world.clinic_queue
+        p         = self.p_clinic
+        queue     = self.world.clinic_queue
+        processed = queue.processed
         p.clear_draw()
-
         row = 1
-        p.safe_addstr(row, 1,
-                      f"Queue: {len(queue.patients):2d} waiting   "
-                      f"Processed today: {len(queue.processed):3d}",
-                      curses.color_pair(C_WHITE) | curses.A_BOLD)
+
+        # ── Header ────────────────────────────────────────────────────────
+        hdr = f"Queue: {len(queue.patients):2d}  Processed: {len(processed):3d}"
+        p.safe_addstr(row, 1, hdr, curses.color_pair(C_WHITE) | curses.A_BOLD)
+        if queue.current_status:
+            live = f"  ⟳ {queue.current_status}"
+            p.safe_addstr(row, len(hdr) + 2, live[:p.w - len(hdr) - 4],
+                          curses.color_pair(C_MAGENTA))
         row += 1
 
-        # Extension point notice
-        p.safe_addstr(row, 1,
-                      "[ LLM diagnostic fn: world.register_diagnostic_fn(fn) ]",
-                      curses.color_pair(C_MAGENTA))
-        row += 1
-        p.safe_addstr(row, 1, "─" * (p.w - 4), curses.color_pair(C_WHITE))
+        if not processed:
+            p.safe_addstr(row, 1, "No cases processed yet.",
+                          curses.color_pair(C_WHITE))
+            p.refresh()
+            return
+
+        # ── Case navigation ───────────────────────────────────────────────
+        n = len(processed)
+        if self._clinic_case_idx == -1 or self._clinic_case_idx >= n:
+            ev       = processed[-1]
+            case_num = n
+        else:
+            ev       = processed[self._clinic_case_idx]
+            case_num = self._clinic_case_idx + 1
+
+        ag         = self.world.agents_by_id.get(ev.agent_id)
+        name       = ag.name if ag else ev.agent_id
+        action_str = ev.action.value if ev.action else "pending"
+        label_str  = ev.oracle_label or "?"
+
+        if action_str == "hospitalise":
+            out_attr = curses.color_pair(C_RED) | curses.A_BOLD
+        elif action_str == "resolve":
+            out_attr = curses.color_pair(C_YELLOW)
+        else:
+            out_attr = curses.color_pair(C_GREEN)
+
+        p.safe_addstr(row, 1, "─" * (p.w - 2), curses.color_pair(C_WHITE))
         row += 1
 
-        # Recent processed cases
-        recent = list(queue.processed)[-(p.h - row - 2):]
-        for ev in recent:
-            action_str = ev.action.value if ev.action else "pending"
-            label_str  = ev.oracle_label or ""
-            ag         = self.world.agents_by_id.get(ev.agent_id)
-            name       = ag.name if ag else ev.agent_id
-            sev_str    = f"{ev.severity:.2f}"
-            sym_str    = f"{ev.symptoms:.2f}"
-            line       = (f"  {name[:14]:<14} sev={sev_str} sym={sym_str}"
-                          f"  [{action_str:<12}] {label_str}")
+        nav = f"[,/.]  {case_num}/{n}"
+        p.safe_addstr(row, 1, f"▶ {name}", out_attr | curses.A_BOLD)
+        p.safe_addstr(row, p.w - len(nav) - 2, nav, curses.color_pair(C_WHITE))
+        row += 1
 
-            if action_str == "hospitalise":
-                attr = curses.color_pair(C_RED) | curses.A_BOLD
-            elif action_str == "resolve":
-                attr = curses.color_pair(C_YELLOW)
-            else:
-                attr = curses.color_pair(C_GREEN)
+        outcome = f"  {label_str} → {action_str}"
+        p.safe_addstr(row, 1, outcome, out_attr)
+        if ev.diagnosis:
+            dx = f"  |  {ev.diagnosis}"
+            p.safe_addstr(row, len(outcome) + 1,
+                          dx[:p.w - len(outcome) - 3], curses.color_pair(C_CYAN))
+        row += 1
+
+        p.safe_addstr(row, 1, "─" * (p.w - 2), curses.color_pair(C_WHITE))
+        row += 1
+
+        # ── Conversation transcript ────────────────────────────────────────
+        text_w = p.w - 6   # [P]/[D] prefix + margins
+
+        wrapped: list[tuple[str, str]] = []
+        for turn in ev.conversation:
+            role   = turn.get("role", "?")
+            text   = turn.get("text", "")
+            prefix = "[P] " if role == "patient" else "[D] "
+            cont   = "    "
+            first  = True
+            while text:
+                if len(text) > text_w:
+                    cut = text.rfind(' ', 0, text_w)
+                    cut = cut if cut > 0 else text_w
+                    chunk, text = text[:cut], text[cut:].lstrip()
+                else:
+                    chunk, text = text, ""
+                wrapped.append((role, (prefix if first else cont) + chunk))
+                first = False
+
+        available  = p.h - row - 1
+        total      = len(wrapped)
+        max_scroll = max(0, total - available)
+        self.scroll_clinic = min(self.scroll_clinic, max_scroll)
+
+        for role, line in wrapped[self.scroll_clinic: self.scroll_clinic + available]:
+            attr = (curses.color_pair(C_GREEN) if role == "patient"
+                    else curses.color_pair(C_CYAN))
             p.safe_addstr(row, 1, line, attr)
             row += 1
             if row >= p.h - 1:
                 break
+
+        if total > available:
+            hint = f"[j/k] {self.scroll_clinic + 1}‥{min(self.scroll_clinic + available, total)}/{total}"
+            p.safe_addstr(p.h - 2, p.w - len(hint) - 2, hint,
+                          curses.color_pair(C_WHITE))
 
         p.refresh()
 
@@ -426,7 +507,7 @@ class TUI:
                      if self.running else curses.color_pair(C_YELLOW) | curses.A_BOLD)
 
         bar = (f" [SPACE] step  [R] run/pause  [F] filter  [D] cloud  [S] strategy  "
-               f"[↑↓] log  [PgUp/Dn] agents  [Q] quit  ")
+               f"[↑↓] log  [PgUp/Dn] agents  [,/.] case  [j/k] clinic  [Q] quit  ")
         try:
             self.stdscr.addstr(H - 1, 0, bar[:W - 12].ljust(W - 12),
                                curses.color_pair(C_WHITE))
@@ -434,6 +515,60 @@ class TUI:
         except curses.error:
             pass
         self.stdscr.noutrefresh()
+
+    # ── Export ───────────────────────────────────────────────────────────────
+
+    def _export_session(self) -> None:
+        _GT_TO_ACTION = {
+            "mild viral infection":           DiagnosticAction.RECOVER,
+            "moderate influenza":             DiagnosticAction.RESOLVE,
+            "severe influenza":               DiagnosticAction.HOSPITALISE,
+            "critical respiratory infection": DiagnosticAction.HOSPITALISE,
+        }
+
+        ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path("viz_output")
+        out_dir.mkdir(exist_ok=True)
+
+        # SIR curve
+        sir_path = out_dir / f"sir_{ts}.csv"
+        with sir_path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["tick", "S", "I", "R"])
+            for tick, (s, i, r) in enumerate(self.world.sir_model.history):
+                w.writerow([tick, s, i, r])
+
+        # LLM doctor stats
+        processed = self.world.clinic_queue.processed
+        llm_path  = out_dir / f"llm_stats_{ts}.csv"
+        n_correct = n_total = 0
+        with llm_path.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["agent_id", "severity", "ground_truth",
+                        "action", "oracle_label", "diagnosis", "correct"])
+            for ev in processed:
+                expected = _GT_TO_ACTION.get(ev.ground_truth or "")
+                correct  = (ev.action == expected) if (ev.action and expected) else None
+                if correct is not None:
+                    n_total += 1
+                    n_correct += int(correct)
+                w.writerow([
+                    ev.agent_id,
+                    f"{ev.severity:.3f}",
+                    ev.ground_truth or "",
+                    ev.action.value if ev.action else "",
+                    ev.oracle_label or "",
+                    ev.diagnosis or "",
+                    "" if correct is None else ("yes" if correct else "no"),
+                ])
+
+        accuracy = f"{100*n_correct/n_total:.1f}%" if n_total else "N/A"
+        self._export_summary = (
+            f"\nSession export\n"
+            f"  SIR curve  → {sir_path}  ({len(self.world.sir_model.history)} ticks)\n"
+            f"  LLM stats  → {llm_path}  ({len(processed)} cases)\n"
+            f"  Accuracy   : {accuracy} ({n_correct}/{n_total} correct)\n"
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 

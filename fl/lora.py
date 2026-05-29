@@ -22,8 +22,8 @@ class LoRAConfig:
     target_modules: list[str] = field(
         default_factory=lambda: ["q_lin", "v_lin"]
     )
-    # mild / moderate / severe / critical
-    num_labels: int = 4
+    # 6 canonical ICD codes × 3 management tiers (home rest / treat / hospitalise)
+    num_labels: int = 18
 
     @property
     def scaling(self) -> float:

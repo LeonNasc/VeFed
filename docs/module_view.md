@@ -1,6 +1,6 @@
 # Module View — Federated Simulated World
 
-**Last updated: 2026-05-29**
+**Last updated: 2026-05-29 (session 3)**
 
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
@@ -85,8 +85,11 @@ graph TD
     MAIN --> ILOG
     MAIN --> TUI
 
+    %% fl also uses ollama (wired at run_federated_training startup)
+    TRAIN --> OLL
+
     %% external
-    OLL["ollama_client.py"] -->|"HTTP/JSON"| OLLAMA[("Ollama\nphi3:mini")]
+    OLL["ollama_client.py\n+ DiagnosticExampleStore\n(few-shot bank)"] -->|"HTTP/JSON"| OLLAMA[("Ollama\nphi3:mini\n(single server)")]
     SERVER -->|"Flower protocol"| FLOWER[("Flower\nserver")]
     TRAIN -->|"wandb.log()"| WANDB[("Weights &\nBiases")]
     SERVER -->|"wandb.log()"| WANDB
@@ -122,8 +125,8 @@ flowchart LR
         CQ["ClinicQueue"]
         IS["InnerState\n(severity · trend\nvitals · mood)"]
         OS["opening_statement()\n(personality-filtered\nnatural language)"]
-        LLM["LLM Doctor\n(phi3:mini / Ollama)\nor rule-based oracle"]
-        DE["DiagnosticEvent\n(symptom_text\nground_truth\nconversation)"]
+        LLM["LLM Doctor\n(phi3:mini / Ollama)\nsingle server\n+ few-shot bank"]
+        DE["DiagnosticEvent\n(symptom_text\nground_truth\nconversation\noracle_label\ndiagnosis)"]
         ILOG2["InteractionLogger\n(.jsonl)"]
         CQ --> IS --> OS --> LLM --> DE
         DE --> ILOG2
@@ -158,6 +161,7 @@ flowchart LR
     GLOBAL -->|"set_weights() before\nnext round"| CLIENT
     CLIENT -->|"metrics dict\nloss · acc · SIR"| LOG
     FEDAVG -->|"aggregated metrics"| LOG
+    FEDAVG -->|"update_examples(round_events)\nbest cross-silo conversations\ninjected into Ollama prompt"| LLM
 
     style SIM fill:#dbeafe,stroke:#3b82f6
     style DIAG fill:#fce7f3,stroke:#ec4899
@@ -176,6 +180,7 @@ sequenceDiagram
     participant S0 as Silo 0 (WorldFLClient)
     participant S1 as Silo 1 (WorldFLClient)
     participant SN as Silo N-1
+    participant OLL as OllamaDiagnosticClient
     participant WB as Weights & Biases
 
     Note over Loop: Round r = 1..num_rounds
@@ -204,7 +209,12 @@ sequenceDiagram
 
     Loop->>Loop: global_weights = _fedavg([w0..wN], [n0..nN])
 
-    Loop->>WB: wandb.log({silo_i/*, aggregated/*}, step=r)
+    Note over Loop: Federated few-shot update
+    Loop->>Loop: round_events = all silos' last_round_events
+    Loop->>OLL: update_examples(round_events)<br/>best cross-silo conversations → Ollama prompt
+    Note over OLL: Doctor improves next round:<br/>faster decisions, better calibration
+
+    Loop->>WB: wandb.log({silo_i/*, aggregated/*,<br/>llm_few_shot_examples}, step=r)
 
     alt all silos is_done
         Loop->>WB: wandb.log({aggregated/all_silos_done: 1})

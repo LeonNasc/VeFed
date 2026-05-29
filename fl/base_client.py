@@ -23,6 +23,19 @@ from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 
 MANAGEMENT_TIERS = ("home rest", "treat", "hospitalise")
 
+# Fixed label vocabulary spanning all progression strategies.
+# Every silo uses this same set so FedAvg weight shapes always match and
+# icd_category_acc is non-trivial even in single-disease runs: the model must
+# learn to map symptom text to the correct disease, not just to management tier.
+CANONICAL_ICD_CODES: list[str] = [
+    "J09.X1",   # Aggressive Flu  — novel influenza A with pneumonia
+    "J10.89",   # Persistent Flu  — identified influenza, other manifestations
+    "J11.1",    # Standard Flu    — unidentified influenza, respiratory
+    "J18.9",    # Deadly          — pneumonia, unspecified
+    "U07.2",    # Mild Corona     — COVID-19, virus not identified
+    "A41.9",    # Slow Burn       — sepsis, unspecified organism
+]
+
 
 def build_label_map(icd_codes: list[str]) -> tuple[dict[str, int], dict[int, str]]:
     """
@@ -103,17 +116,7 @@ class WorldFLClient:
         self.lr                  = lr
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Build label map from the ICD codes present in this silo's progression
-        # strategy.  All silos in an experiment must use the same ICD set for
-        # FedAvg to be valid — the orchestrator ensures this via consistent config.
-        icd = getattr(world.progression, "icd_code", None)
-        if icd is None:
-            # MIMIC strategy: enumerate all possible MIMIC ICD codes
-            from simulation.mimic_db import MimicDiseaseTrajectory
-            icd_codes = list(MimicDiseaseTrajectory._ICD_BY_GROUP.values())
-        else:
-            icd_codes = [icd]
-        self._label2id, self._id2label = build_label_map(icd_codes)
+        self._label2id, self._id2label = build_label_map(CANONICAL_ICD_CODES)
 
         # LoRA config must match the actual number of output classes
         base_cfg = lora_config or LoRAConfig()
@@ -123,6 +126,7 @@ class WorldFLClient:
         self.lora_config = base_cfg
 
         self._model = None  # lazy-built on first use
+        self.last_round_events: list = []   # events from the most recent round
 
     @property
     def model(self):
@@ -315,6 +319,20 @@ class WorldFLClient:
             "num_examples": n,
         }
 
+    # ── Memory management ──────────────────────────────────────────────────────
+
+    def release_model(self) -> None:
+        """Free the LoRA model from memory. Rebuilt automatically on next use."""
+        import gc
+        self._model = None
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
     # ── Convenience ────────────────────────────────────────────────────────────
 
     def run_round(self) -> dict:
@@ -336,6 +354,7 @@ class WorldFLClient:
         sir_s, sir_i, sir_r           — SIR state after simulation
         """
         events     = self.run_simulation_round()
+        self.last_round_events = events
         num_events = len(events)
         sir        = self.world.sir_model
 

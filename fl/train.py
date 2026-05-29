@@ -73,6 +73,7 @@ class FLTrainConfig:
     wandb_run_name:     Optional[str] = None
     wandb_entity:       Optional[str] = None
     wandb_offline:      bool  = False    # True → no network, logs saved locally
+    use_ollama:         bool  = True     # Wire Ollama doctor; falls back to stub if unreachable
 
     def lora_config(self) -> LoRAConfig:
         return LoRAConfig(
@@ -171,6 +172,24 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             )
         )
 
+    # ── Wire Ollama doctor — single shared server, all silos call it ─────────
+    ollama_client  = None
+    ollama_active  = False
+    ollama_status  = "disabled"
+    if cfg.use_ollama:
+        from simulation.ollama_client import OllamaDiagnosticClient
+        ollama_client = OllamaDiagnosticClient()
+        if ollama_client.health_check():
+            for silo in silos:
+                q = silo.world.clinic_queue
+                silo.world.register_diagnostic_fn(
+                    lambda ev, _q=q: ollama_client.diagnose(ev, _queue=_q)
+                )
+            ollama_active = True
+            ollama_status = f"active ({ollama_client.model})"
+        else:
+            ollama_status = "unreachable — using stub oracle"
+
     print(
         f"\n{'─'*60}\n"
         f"  FedWorld FL Training\n"
@@ -179,6 +198,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
         f"local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
         f"  progression={cfg.progression}  seed={cfg.seed}\n"
+        f"  LLM doctor: {ollama_status}\n"
         f"{'─'*60}\n"
     )
 
@@ -237,6 +257,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         if trained_weights:
             global_weights = _fedavg(trained_weights, trained_examples)
         log["aggregated/silos_trained"] = sum(round_trained)
+
+        # ── Federated few-shot update — refresh Ollama doctor's example bank ──
+        # Harvest correct conversations from all silos this round and update
+        # the shared Ollama client so the doctor improves each round.
+        if ollama_active and ollama_client is not None:
+            round_events = [ev for silo in silos for ev in silo.last_round_events]
+            ollama_client.update_examples(round_events)
+            log["aggregated/llm_few_shot_examples"] = ollama_client.num_examples()
 
         # ── Early exit if all silos finished ──────────────────────────────────
         if all(silo.world.is_done for silo in silos):
@@ -332,6 +360,8 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--run-name",    type=str,   default=None)
     p.add_argument("--entity",      type=str,   default=None)
     p.add_argument("--offline",     action="store_true")
+    p.add_argument("--no-ollama",   action="store_true",
+                   help="Skip Ollama doctor; use rule-based stub (faster, no LLM calls)")
     a = p.parse_args()
     return FLTrainConfig(
         num_silos       = a.silos,
@@ -351,6 +381,7 @@ def _parse_args() -> FLTrainConfig:
         wandb_run_name  = a.run_name,
         wandb_entity    = a.entity,
         wandb_offline   = a.offline,
+        use_ollama      = not a.no_ollama,
     )
 
 

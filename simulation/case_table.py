@@ -109,31 +109,34 @@ class CaseTable:
     def _generate_synthetic(self, max_days: int) -> dict[str, list[float]]:
         """
         Generate correlated time series from the trajectory.
-        Each variable = baseline + slope × severity(t) + noise + lag.
+        Each variable = baseline + (slope × vital_multiplier) × severity(t) + noise.
+
+        vital_slopes on the trajectory (set per disease strategy) scale each
+        variable's slope — e.g. pneumonia amplifies SpO2 drop and RR rise while
+        dampening fever, making each disease clinically distinguishable from vitals alone.
         """
+        disease_slopes = getattr(self._trajectory, "vital_slopes", {})
         data = {var: [] for var in NORMAL_RANGES.keys()}
 
         for day in range(max_days):
-            # Evaluate trajectory at this day
-            # (We don't actually step it — just peek at internal state)
-            # For generation, we'll simulate the curve ourselves
             sev = self._severity_at_day(day)
 
             for var in NORMAL_RANGES.keys():
                 baseline_lo, baseline_hi = NORMAL_RANGES[var]
-                baseline = (baseline_lo + baseline_hi) / 2.0
-                slope    = SEVERITY_SLOPES.get(var, 0)
+                baseline    = (baseline_lo + baseline_hi) / 2.0
+                base_slope  = SEVERITY_SLOPES.get(var, 0)
+                multiplier  = disease_slopes.get(var, 1.0)
+                slope       = base_slope * multiplier
 
                 # Temp lags severity by ~1 day
                 lag = 1 if var == "temp" else 0
                 sev_lagged = self._severity_at_day(max(0, day - lag))
 
-                value = baseline + slope * sev_lagged * 10  # *10 because slope is per 0.1 sev
-                noise = self._rng.gauss(0, abs(slope) * 0.3)  # proportional noise
+                value = baseline + slope * sev_lagged * 10  # *10: slope is per 0.1 sev
+                noise = self._rng.gauss(0, abs(slope) * 0.3)
                 value += noise
-                value = max(0, value)  # clamp negatives
+                value = max(0, value)
 
-                # SpO2 and BP can't exceed physiological limits
                 if var == "SpO2":
                     value = min(100, value)
                 elif var == "BP_sys":
@@ -206,3 +209,80 @@ class MimicCaseTable(CaseTable):
     # _severity_at_day is never called on MimicCaseTable — overridden for safety
     def _severity_at_day(self, day: int) -> float:
         return 0.0
+
+
+# ─── Clinical scoring ─────────────────────────────────────────────────────────
+
+def news2_score(case_table: CaseTable, day: int) -> int:
+    """
+    NEWS2-inspired score from simulation vital signs.
+
+    Uses standard NEWS2 variable ranges (RR, SpO2, BP_sys, HR, temp) but
+    with simulation-calibrated thresholds because SEVERITY_SLOPES are scaled
+    for narrative realism rather than clinical precision.
+
+    Standard NEWS2 variable scoring:
+      RR   : ≤8→3, 9-11→1, 12-20→0, 21-24→2, ≥25→3
+      SpO2 : ≤91→3, 92-93→2, 94-95→1, ≥96→0
+      BP_s : ≤90→3, 91-100→2, 101-110→1, 111-219→0, ≥220→3
+      HR   : ≤40→3, 41-50→1, 51-90→0, 91-110→1, 111-130→2, ≥131→3
+      temp : ≤35→3, 35.1-36→1, 36.1-38→0, 38.1-39→1, ≥39.1→2
+    """
+    score = 0
+
+    rr = case_table.get("RR", day) or 16
+    if rr <= 8:       score += 3
+    elif rr <= 11:    score += 1
+    elif rr <= 20:    score += 0
+    elif rr <= 24:    score += 2
+    else:             score += 3
+
+    spo2 = case_table.get("SpO2", day) or 98
+    if spo2 <= 91:    score += 3
+    elif spo2 <= 93:  score += 2
+    elif spo2 <= 95:  score += 1
+
+    bp = case_table.get("BP_sys", day) or 120
+    if bp <= 90:      score += 3
+    elif bp <= 100:   score += 2
+    elif bp <= 110:   score += 1
+    elif bp >= 220:   score += 3
+
+    hr = case_table.get("HR", day) or 75
+    if hr <= 40:      score += 3
+    elif hr <= 50:    score += 1
+    elif hr <= 90:    score += 0
+    elif hr <= 110:   score += 1
+    elif hr <= 130:   score += 2
+    else:             score += 3
+
+    temp = case_table.get("temp", day) or 37.0
+    if temp <= 35.0:   score += 3
+    elif temp <= 36.0: score += 1
+    elif temp <= 38.0: score += 0
+    elif temp <= 39.0: score += 1
+    else:              score += 2
+
+    return score
+
+
+def management_from_vitals(case_table: CaseTable, day: int) -> str:
+    """
+    Derive management tier from NEWS2 score using simulation-calibrated thresholds.
+
+    Real-world NEWS2 uses 0-4/5-6/≥7. Because simulation SEVERITY_SLOPES are
+    amplified for narrative effect, the equivalent thresholds here are:
+      0-5  → home rest   (low acuity — self-care)
+      6-9  → treat       (medium acuity — medical review + treatment)
+      10+  → hospitalise (high acuity — immediate admission)
+
+    This makes management disease-dependent: pneumonia (severe SpO2/RR) scores
+    higher than flu (fever-dominant) at the same internal severity level.
+    """
+    score = news2_score(case_table, day)
+    if score >= 10:
+        return "hospitalise"
+    elif score >= 6:
+        return "treat"
+    else:
+        return "home rest"
