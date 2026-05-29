@@ -409,6 +409,13 @@ class WorldEngine:
             f"Day {self.current_day}: Progression → {strategy.name}"
         )
 
+    def set_patient_llm(self, client) -> None:
+        """
+        Wire a PatientLLMClient for LLM-generated opening statements.
+        If not set, opening statements fall back to SymptomNarrator templates.
+        """
+        self._patient_llm = client
+
     def attach_interaction_logger(self, logger) -> None:
         """
         Register an InteractionLogger.  Every processed DiagnosticEvent will
@@ -465,8 +472,8 @@ class WorldEngine:
             ag = self.agents_by_id.get(c.agent_id)
             if ag:
                 c.conversation.append({
-                    'role': 'patient',
-                    'text': ag.opening_statement(),
+                    'role':  'patient',
+                    'text':  self._generate_opening(ag),
                 })
             self.clinic_queue.enqueue(c)
 
@@ -488,6 +495,23 @@ class WorldEngine:
         # Keep log bounded
         if len(self.event_log) > 200:
             self.event_log = self.event_log[-200:]
+
+    def _generate_opening(self, agent) -> str:
+        """
+        Opening patient complaint for the clinic queue.
+        Uses PatientLLMClient if wired; falls back to SymptomNarrator templates.
+        """
+        patient_llm = getattr(self, "_patient_llm", None)
+        if patient_llm is not None:
+            try:
+                return patient_llm.opening_statement(
+                    agent.health_state.severity,
+                    agent.health_state.days_infected,
+                    agent.personality,
+                )
+            except Exception:
+                pass
+        return agent.opening_statement()
 
     def _process_clinic_queue(self) -> None:
         """

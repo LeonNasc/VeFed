@@ -318,13 +318,24 @@ def _launch(cfg: RunConfig) -> None:
     )
 
     from simulation.interaction_log import InteractionLogger
-    from simulation.ollama_client import OllamaDiagnosticClient
+    from simulation.ollama_client   import OllamaDiagnosticClient
+    from simulation.patient_llm     import PatientLLMClient
 
     logger = InteractionLogger()
     world.attach_interaction_logger(logger)
     print(f"Interaction log → {logger.path}")
 
-    client = OllamaDiagnosticClient()
+    # Patient LLM — small frozen model for opening statements and answers
+    patient_llm = PatientLLMClient()
+    if patient_llm.health_check():
+        world.set_patient_llm(patient_llm)
+        print(f"Patient LLM: {patient_llm.model} active")
+    else:
+        patient_llm = None
+        print(f"Patient LLM: unreachable — using templates (ollama pull tinyllama)")
+
+    # Doctor LLM — multi-turn diagnostic model with vitals integration
+    client      = OllamaDiagnosticClient(patient_llm=patient_llm)
     ollama_error = None
     if client.health_check():
         q = world.clinic_queue

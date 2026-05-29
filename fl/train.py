@@ -74,6 +74,7 @@ class FLTrainConfig:
     wandb_entity:       Optional[str] = None
     wandb_offline:      bool  = False    # True → no network, logs saved locally
     use_ollama:         bool  = True     # Wire Ollama doctor; falls back to stub if unreachable
+    patient_model:      str   = "tinyllama"  # Ollama model for patient statement generation
 
     def lora_config(self) -> LoRAConfig:
         return LoRAConfig(
@@ -172,13 +173,27 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             )
         )
 
-    # ── Wire Ollama doctor — single shared server, all silos call it ─────────
+    # ── Wire LLM clients — single shared Ollama server, all silos call it ────
     ollama_client  = None
     ollama_active  = False
     ollama_status  = "disabled"
+    patient_status = "disabled"
     if cfg.use_ollama:
         from simulation.ollama_client import OllamaDiagnosticClient
-        ollama_client = OllamaDiagnosticClient()
+        from simulation.patient_llm   import PatientLLMClient
+
+        # Patient LLM — small frozen model, generates opening statements + answers
+        patient_llm = PatientLLMClient(model=cfg.patient_model)
+        if patient_llm.health_check():
+            for silo in silos:
+                silo.world.set_patient_llm(patient_llm)
+            patient_status = f"active ({patient_llm.model})"
+        else:
+            patient_llm    = None
+            patient_status = f"unreachable — pull: ollama pull {cfg.patient_model}"
+
+        # Doctor LLM — multi-turn diagnostic model, receives formatted vitals
+        ollama_client = OllamaDiagnosticClient(patient_llm=patient_llm)
         if ollama_client.health_check():
             for silo in silos:
                 q = silo.world.clinic_queue
@@ -198,7 +213,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
         f"local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
         f"  progression={cfg.progression}  seed={cfg.seed}\n"
-        f"  LLM doctor: {ollama_status}\n"
+        f"  LLM doctor:  {ollama_status}\n"
+        f"  LLM patient: {patient_status}\n"
         f"{'─'*60}\n"
     )
 
