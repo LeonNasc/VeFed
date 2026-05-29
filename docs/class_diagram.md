@@ -1,5 +1,7 @@
 # Class Diagram — Federated Simulated World
 
+**Last updated: 2026-05-29**
+
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
 Two diagrams are provided:
@@ -79,6 +81,8 @@ classDiagram
         +decay_rate : float
         +symptom_sensitivity : float
         +severity_floor_weight : float
+        +disease_name : str
+        +icd_code : str
         +trend : str
         +cleared : bool
         +step() tuple[float,float]
@@ -117,6 +121,8 @@ classDiagram
         +symptoms : float
         +days_infected : int
         +ground_truth : str
+        Note: format = ICD-code / management-tier
+        e.g. J10.89 / treat
         +conversation : list
         +case_table : CaseTable
         +action : DiagnosticAction
@@ -158,14 +164,30 @@ classDiagram
     class DiseaseProgressionStrategy {
         <<abstract>>
         +name : str
+        +icd_code : str
         +sample_trajectory(rng) DiseaseTrajectory
     }
-    class StandardFluProgression
-    class AggressiveFluProgression
-    class MildCoronaProgression
-    class SlowBurnProgression
-    class DeadlyProgression
-    class MimicProgression
+    class StandardFluProgression {
+        icd_code = J11.1
+    }
+    class AggressiveFluProgression {
+        icd_code = J09.X1
+    }
+    class PersistentFluProgression {
+        icd_code = J10.89
+    }
+    class MildCoronaProgression {
+        icd_code = U07.2
+    }
+    class SlowBurnProgression {
+        icd_code = A41.9
+    }
+    class DeadlyProgression {
+        icd_code = J18.9
+    }
+    class MimicProgression {
+        icd_code per diagnosis_group
+    }
 
     %% ── Relationships ────────────────────────────────────────────────────────
     WorldEngine "1" *-- "N" Agent
@@ -278,15 +300,25 @@ classDiagram
         +world : WorldEngine
         +lora_config : LoRAConfig
         +sim_days : int
+        +min_events_to_train : int
         +local_epochs : int
-        +batch_size : int
-        +lr : float
+        +device : str
+        +_label2id : dict
+        +_id2label : dict
         +run_simulation_round() list
         +train_on_events(events) tuple[int, list]
         +evaluate(events) dict
+        Note: returns icd_exact_acc, icd_category_acc, mgmt_acc
         +run_round() dict
         +get_weights() list[ndarray]
         +set_weights(weights)
+    }
+
+    class LabelMap {
+        <<utility>>
+        build_label_map(icd_codes)
+        icd_match_score(pred, true) float
+        MANAGEMENT_TIERS = home rest / treat / hospitalise
     }
 
     class LoRAConfig {

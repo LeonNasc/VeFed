@@ -1,5 +1,7 @@
 # Module View — Federated Simulated World
 
+**Last updated: 2026-05-29**
+
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
 Two views are provided:
@@ -216,8 +218,20 @@ sequenceDiagram
 
 | Structure | From | To | Contents |
 |---|---|---|---|
-| `DiagnosticEvent` | `ClinicQueue` | `WorldFLClient` | symptom text, ground truth, severity, conversation, CaseTable |
+| `DiagnosticEvent.ground_truth` | `Agent.build_diagnostic_event()` | `WorldFLClient._build_dataset()` | `"{ICD-10 code} / {management tier}"` e.g. `"J10.89 / treat"` |
+| `DiseaseTrajectory.icd_code` | `DiseaseProgressionStrategy.sample_trajectory()` | `Agent.build_diagnostic_event()` | ICD-10 code stamped at infection time |
+| `DiagnosticEvent` | `ClinicQueue` | `WorldFLClient` | symptom text, ground_truth (ICD/mgmt), severity, conversation, CaseTable |
 | `InnerState` | `Agent.inner_state` | `SymptomNarrator` | severity, σ, trend, fatigue, pain, mood, top_vital |
 | LoRA weights | `WorldFLClient.get_weights()` | `_fedavg()` | list of np.ndarray (q_lin + v_lin adapters only) |
-| `run_round()` dict | `WorldFLClient` | `run_federated_training()` | loss, accuracy, num_examples, SIR, num_events, epoch_losses |
-| W&B log dict | `run_federated_training()` | `wandb.log()` | silo_N/\* + aggregated/\* keyed by round step |
+| `run_round()` dict | `WorldFLClient` | `run_federated_training()` | loss, accuracy (ICD-cat+mgmt), icd_exact_acc, icd_category_acc, mgmt_acc, SIR, num_events |
+| W&B log dict | `run_federated_training()` | `wandb.log()` | silo_N/\* + aggregated/\* including icd_category_acc, mgmt_acc |
+
+## ICD-10 Accuracy Scoring
+
+| Prediction vs Ground Truth | Score | Rationale |
+|---|:---:|---|
+| Exact subcategory match (J10.89 == J10.89) | 1.0 | Fully correct disease identification |
+| 3-char category match (J10.xx == J10.89) | 0.5 | Same disease family, wrong specification |
+| No match (J11.1 vs J10.89) | 0.0 | Wrong disease |
+
+**Primary metric `accuracy`** = `(icd_category_correct AND mgmt_correct) / N` — clinically acceptable: right disease family, right treatment intensity.
