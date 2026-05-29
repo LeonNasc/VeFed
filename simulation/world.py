@@ -164,13 +164,18 @@ class ClinicQueue:
                 agent.current_location = hospital_id
                 agent.current_type     = LocationType.HOSPITAL
                 agent.health_state.apply_treatment(decay_boost=0.20)
+                agent._care_cooldown   = 7   # review in a week
                 msgs.append(f"{agent.name} → hospitalised")
             elif action == DiagnosticAction.RECOVER:
+                agent._care_cooldown   = 5   # rest at home, return if worse
                 msgs.append(f"{agent.name} → home recovery")
             elif action == DiagnosticAction.RESOLVE:
-                agent.health_state.apply_treatment(decay_boost=0.15)
+                # Small boost — management, not cure; preserves chronic trajectories
+                agent.health_state.apply_treatment(decay_boost=0.003)
+                agent._care_cooldown   = 7   # follow-up in a week
                 msgs.append(f"{agent.name} → treatment plan assigned")
             else:
+                agent._care_cooldown   = 3
                 msgs.append(f"{agent.name} → {action.value if action else 'assessed'}")
         return msgs
 

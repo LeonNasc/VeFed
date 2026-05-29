@@ -291,6 +291,7 @@ class Agent:
         self.personality       = personality
         self._narrator         = SymptomNarrator(rng)
         self._case_table       = None  # set at infection
+        self._care_cooldown:   int   = 0   # days until next clinic visit allowed
         self.log:              list[str] = []
 
     def move_to(self, location_id: str, loc_type: LocationType) -> None:
@@ -330,22 +331,31 @@ class Agent:
 
     def should_seek_care(self) -> bool:
         """
-        Agent seeks care if perceived symptoms exceed threshold γ_a,
-        OR if severity is at or above the hospitalisation threshold (0.70).
-        The severity override prevents critically ill agents from silently
-        deteriorating at the plateau where σ is muted.
+        Agent seeks care under three conditions:
+          1. Critically ill (INFECTED, severity ≥ 0.70) — always seek care.
+          2. Still quite sick during recovery (RECOVERING, severity ≥ 0.40) —
+             at treatment threshold a patient would reasonably keep visiting.
+             This is the key path for slow-recovering diseases (Persistent Flu,
+             Slow Burn) whose agents are RECOVERING but still unwell for weeks.
+          3. Symptom signal σ ≥ personal threshold γ_a (both statuses).
         """
         if self.hospitalised:
+            return False
+        if self._care_cooldown > 0:
             return False
         hs = self.health_state
         if hs.status not in (HealthStatus.INFECTED, HealthStatus.RECOVERING):
             return False
         if hs.status == HealthStatus.INFECTED and hs.severity >= 0.70:
             return True
+        if hs.status == HealthStatus.RECOVERING and hs.severity >= 0.30:
+            return True
         return hs.symptoms >= self.severity_threshold
 
     def reset_daily_exposure(self) -> None:
         self.cumulative_exposure = 0.0
+        if self._care_cooldown > 0:
+            self._care_cooldown -= 1
 
     @property
     def inner_state(self) -> 'InnerState':

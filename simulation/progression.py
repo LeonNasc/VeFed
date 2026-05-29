@@ -202,6 +202,34 @@ class AggressiveFluProgression(DiseaseProgressionStrategy):
         )
 
 
+class PersistentFluProgression(DiseaseProgressionStrategy):
+    """
+    Persistent respiratory infection — flu-like onset but very slow recovery.
+
+    Designed to produce training events across many FL rounds:
+      - Quick rise (3 d): agents hit clinic in round 1
+      - Moderate-high peak (~0.65): ~35 % of agents cross the 0.70 severity
+        override and seek care every day regardless of σ
+      - Very slow decay (rate ~0.025): illness lasts 5–7 weeks, so later
+        rounds still have data
+
+    Intended use: pair with AggressiveFluStrategy (transmission) so the
+    epidemic spreads across the population in the first 1–2 rounds, then
+    agents linger and generate training examples for the remaining rounds.
+    """
+    name        = "Persistent Flu"
+    description = "Fast onset (~3 d), moderate-high peak (~0.65), very slow decay — 5–7 week illness."
+
+    def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.65, 0.10, 0.40, 0.90),
+            rise_days             = self._sample(rng, 3.0,  0.5,  1.5,  5.0),
+            decay_rate            = self._sample(rng, 0.015, 0.003, 0.008, 0.025),
+            symptom_sensitivity   = self._sample(rng, 4.0,  0.5,  2.0,  6.5),
+            severity_floor_weight = 0.25,
+        )
+
+
 class MildCoronaProgression(DiseaseProgressionStrategy):
     """
     Mild coronavirus — low peak, broad curve (slow rise AND slow decay),
@@ -324,6 +352,7 @@ PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
     s.name: s for s in [
         StandardFluProgression(),
         AggressiveFluProgression(),
+        PersistentFluProgression(),
         MildCoronaProgression(),
         SlowBurnProgression(),
         DeadlyProgression(),
