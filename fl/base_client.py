@@ -57,19 +57,23 @@ class WorldFLClient:
         local_epochs: int = 3,
         batch_size: int = 8,
         lr: float = 1e-4,
+        device: Optional[str] = None,
     ):
+        import torch
         self.world = world
         self.lora_config = lora_config or LoRAConfig()
         self.sim_days = sim_days
         self.local_epochs = local_epochs
         self.batch_size = batch_size
         self.lr = lr
+        # Auto-select GPU if available, fallback to CPU
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._model = None  # lazy-built on first use
 
     @property
     def model(self):
         if self._model is None:
-            self._model = build_model(self.lora_config)
+            self._model = build_model(self.lora_config).to(self.device)
         return self._model
 
     # ── Simulation ─────────────────────────────────────────────────────────────
@@ -137,7 +141,7 @@ class WorldFLClient:
         dataset = TensorDataset(enc["input_ids"], enc["attention_mask"], label_t)
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        model = self.model
+        model = self.model   # already on self.device
         model.train()
         optimizer = AdamW(
             [p for p in model.parameters() if p.requires_grad],
@@ -148,6 +152,9 @@ class WorldFLClient:
         for _ in range(self.local_epochs):
             batch_losses = []
             for input_ids, attn_mask, batch_labels in loader:
+                input_ids    = input_ids.to(self.device)
+                attn_mask    = attn_mask.to(self.device)
+                batch_labels = batch_labels.to(self.device)
                 optimizer.zero_grad()
                 out = model(
                     input_ids=input_ids,
@@ -156,7 +163,7 @@ class WorldFLClient:
                 )
                 out.loss.backward()
                 optimizer.step()
-                batch_losses.append(float(out.loss))
+                batch_losses.append(out.loss.detach().item())
             epoch_losses.append(sum(batch_losses) / len(batch_losses))
 
         return len(texts), epoch_losses
@@ -189,14 +196,14 @@ class WorldFLClient:
             texts, padding=True, truncation=True,
             max_length=128, return_tensors="pt",
         )
-        label_t = torch.tensor(labels, dtype=torch.long)
+        label_t = torch.tensor(labels, dtype=torch.long).to(self.device)
 
         model = self.model
         model.eval()
         with torch.no_grad():
             out = model(
-                input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"],
+                input_ids=enc["input_ids"].to(self.device),
+                attention_mask=enc["attention_mask"].to(self.device),
                 labels=label_t,
             )
         acc = (out.logits.argmax(dim=-1) == label_t).float().mean().item()

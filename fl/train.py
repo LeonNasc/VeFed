@@ -255,15 +255,16 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         silo.set_weights(global_weights)
 
     run.finish()
-    print(f"\nTraining complete. W&B run: {run.url}\n")
+    run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
+    print(f"\nTraining complete. W&B: {run_ref}\n")
     return silos
 
 
 # ── Console progress helper ───────────────────────────────────────────────────
 
 def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
-    agg_loss = log.get("aggregated/loss", float("nan"))
-    agg_acc  = log.get("aggregated/accuracy", float("nan"))
+    agg_loss = log.get("aggregated/loss") or float("nan")
+    agg_acc  = log.get("aggregated/accuracy") or float("nan")
     n_train  = int(log.get("aggregated/num_trained", 0))
 
     silo_parts = []

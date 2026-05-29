@@ -36,12 +36,18 @@ def build_model(config: LoRAConfig):
     Only LoRA adapter params are trainable; base weights are frozen.
     """
     from peft import LoraConfig as PeftLoraConfig, TaskType, get_peft_model
-    from transformers import AutoModelForSequenceClassification
+    from transformers import AutoModelForSequenceClassification, logging as hf_logging
+
+    # Suppress expected warnings: UNEXPECTED keys = MLM head not used for
+    # classification; MISSING keys = new classification head (expected).
+    hf_logging.set_verbosity_error()
 
     base = AutoModelForSequenceClassification.from_pretrained(
         config.model_name_or_path,
         num_labels=config.num_labels,
     )
+
+    hf_logging.set_verbosity_warning()  # restore for other HF calls
     peft_cfg = PeftLoraConfig(
         task_type=TaskType.SEQ_CLS,
         r=config.rank,
@@ -71,7 +77,9 @@ def set_lora_weights(model, weights: list[np.ndarray]) -> None:
     idx = 0
     for name, p in model.named_parameters():
         if "lora_" in name and p.requires_grad:
-            p.data = torch.tensor(weights[idx], dtype=p.dtype)
+            # Respect the parameter's current device — avoids CPU↔GPU mismatch
+            # when the model has been moved to GPU before set_weights() is called.
+            p.data = torch.as_tensor(weights[idx], dtype=p.dtype).to(p.device)
             idx += 1
 
 
