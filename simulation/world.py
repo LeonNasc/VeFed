@@ -191,7 +191,7 @@ class WorldEngine:
     """
 
     TICKS_PER_DAY = 288
-    BASE_BETA     = 0.25   # baseline transmission rate (scaled by strategy)
+    BASE_BETA     = 1.50   # baseline transmission rate (scaled by strategy)
 
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
@@ -320,14 +320,20 @@ class WorldEngine:
             loc = self.locations.get(agent.current_location)
             if loc is None:
                 continue
-            # (β · Σ I(a' ∈ I_t) + ω(l_t)) / T  — divide by ticks/day so
-            # BASE_BETA is a daily rate and cumulative_exposure ≈ β at day's end.
+            # Frequency-dependent force of infection (eq. 2):
+            #   eps = (β · I_loc/N_loc + ω) / T
+            # Dividing by location occupancy makes exposure scale with local
+            # prevalence rather than absolute infectious count — prevents
+            # explosive spread in small bounded populations where density-
+            # dependent β diverges from the intended population-level rate.
+            n_present    = len(loc.agents_present)
             n_infectious = sum(
                 1 for aid in loc.agents_present
                 if self.agents_by_id[aid].status == HealthStatus.INFECTED
             )
+            prevalence = n_infectious / n_present if n_present > 0 else 0.0
             beta = self.BASE_BETA * self.strategy.transmission_rate(agent.current_type)
-            eps = (beta * n_infectious + loc.ambient_exposure()) / self.TICKS_PER_DAY
+            eps = (beta * prevalence + loc.ambient_exposure()) / self.TICKS_PER_DAY
             agent.update_health(eps)
 
         # Random disease-cloud generation (stochastic events)
