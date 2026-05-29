@@ -27,27 +27,21 @@ TIMEOUT_SEC = 60
 MAX_TURNS   = 6   # safety cap — prevents loops if model keeps asking questions
 
 SYSTEM_PROMPT = """\
-You are a clinical triage doctor. Follow this protocol — no shortcuts.
+You are a triage doctor. Each reply is ONE JSON object — no other text.
 
-Step 1  Ask ONE follow-up question about the patient's symptoms
-        (onset, breathing, pain, fever, what makes it worse, etc.)
-Step 2  Request an objective vitals panel: {"type": "vitals_request"}
-Step 3  After receiving vitals, deliver your triage decision.
+Before you diagnose, you must first ask the patient one question, then request their vitals.
 
-Each response is a single JSON object — no other text:
+To ask a question:
+{"type": "question", "text": "your question here"}
 
-  Follow-up : {"type": "question", "text": "<one concise question>"}
-  Vitals    : {"type": "vitals_request"}
-  Decision  : {"type": "decision", "action": "<home_recovery|resolve|hospitalise>",
-               "label": "<mild|moderate|severe>", "diagnosis": "<brief diagnosis>",
-               "notes": "<one sentence rationale>"}
+To request vitals (after the patient has answered):
+{"type": "vitals_request"}
 
-Triage actions:
-  home_recovery — mild:     patient rests at home
-  resolve       — moderate: prescription or ongoing treatment needed
-  hospitalise   — severe:   immediate admission required
+To give your diagnosis (only after seeing vitals):
+{"type": "decision", "action": "home_recovery or resolve or hospitalise", "label": "mild or moderate or severe", "diagnosis": "brief text", "notes": "one sentence"}
 
-Never diagnose before completing Steps 1 and 2.
+Actions: home_recovery=mild (rest at home), resolve=moderate (needs treatment), hospitalise=severe (admit now).
+Output only one JSON object per turn. Never diagnose before seeing vitals.
 """
 
 
@@ -98,7 +92,7 @@ class OllamaDiagnosticClient:
             parsed = self._parse_response(raw)
             turn  += 1
 
-            if parsed["type"] == "question" and not vitals_taken:
+            if parsed["type"] == "question" and not vitals_taken and parsed.get("text"):
                 # Step 1 — symptom follow-up
                 q_text = parsed["text"]
                 event.conversation.append({"role": "doctor",  "text": q_text})
@@ -295,13 +289,37 @@ class OllamaDiagnosticClient:
     def _parse_response(self, raw: str) -> dict:
         try:
             data = json.loads(raw)
-            if "type" not in data:
-                data["type"] = "decision" if "action" in data else "question"
-            return data
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, ValueError):
             return {"type": "decision", "action": "home_recovery",
                     "label": "parse_error",
                     "notes": f"Unparseable output: {raw[:60]}"}
+
+        # Ideal flat response: {"type": "question"|"vitals_request"|"decision", ...}
+        known = ("question", "vitals_request", "decision")
+        top_type = data.get("type", "")
+        if top_type in known and (top_type != "question" or data.get("text")):
+            return data
+
+        # phi3:mini sometimes nests responses: {"Follow-up": {"type":"question","text":"..."},...}
+        # Walk one level of nesting and pick the first well-formed action.
+        for val in data.values():
+            if not isinstance(val, dict):
+                continue
+            vtype = val.get("type", "")
+            if vtype == "question" and val.get("text"):
+                return val
+            if vtype == "vitals_request":
+                return val
+            if vtype == "decision" and val.get("action"):
+                return val
+
+        # Fall back: if top-level has "action" it's a malformed decision
+        if "action" in data:
+            data["type"] = "decision"
+            return data
+
+        # Advance protocol: skip to vitals request rather than failing silently
+        return {"type": "vitals_request"}
 
     def _force_decision(self, messages: list[dict]) -> dict:
         messages = messages + [{
