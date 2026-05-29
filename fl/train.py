@@ -56,6 +56,7 @@ class FLTrainConfig:
     num_rounds:         int   = 10
     num_agents:         int   = 30       # agents per silo
     sim_days:           int   = 7        # simulated days per FL round
+    min_events_to_train: int  = 10       # skip LoRA update if fewer events this round
     local_epochs:       int   = 3
     batch_size:         int   = 8
     lr:                 float = 1e-4
@@ -160,12 +161,13 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         )
         silos.append(
             WorldFLClient(
-                world        = world,
-                lora_config  = lora_cfg,
-                sim_days     = cfg.sim_days,
-                local_epochs = cfg.local_epochs,
-                batch_size   = cfg.batch_size,
-                lr           = cfg.lr,
+                world                = world,
+                lora_config          = lora_cfg,
+                sim_days             = cfg.sim_days,
+                min_events_to_train  = cfg.min_events_to_train,
+                local_epochs         = cfg.local_epochs,
+                batch_size           = cfg.batch_size,
+                lr                   = cfg.lr,
             )
         )
 
@@ -174,8 +176,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         f"  FedWorld FL Training\n"
         f"  silos={cfg.num_silos}  rounds={cfg.num_rounds}  "
         f"agents/silo={cfg.num_agents}\n"
-        f"  sim_days={cfg.sim_days}  local_epochs={cfg.local_epochs}  "
-        f"lr={cfg.lr}\n"
+        f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
+        f"local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
         f"  progression={cfg.progression}  seed={cfg.seed}\n"
         f"{'─'*60}\n"
     )
@@ -187,8 +189,9 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
     for round_num in range(1, cfg.num_rounds + 1):
         t0 = time.time()
 
-        round_weights:  list[list[np.ndarray]] = []
+        round_weights:   list[list[np.ndarray]] = []
         round_nexamples: list[int]             = []
+        round_trained:   list[bool]            = []   # which silos actually trained
         log: dict = {"round": round_num}
 
         agg_loss = agg_acc = agg_n = agg_trained = 0.0
@@ -198,8 +201,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             m = silo.run_round()
 
             round_weights.append(silo.get_weights())
-            n = m.get("num_examples", 0)
+            n          = m.get("num_examples", 0)
+            did_train  = bool(m.get("trained", 0))
             round_nexamples.append(n)
+            round_trained.append(did_train)
 
             # Per-silo metrics
             epoch_losses = m.pop("epoch_losses", [])
@@ -212,21 +217,22 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 for ep_i, ep_loss in enumerate(epoch_losses):
                     log[f"silo_{i}/epoch_{ep_i}_loss"] = ep_loss
 
-            # Flag done silos
             if silo.world.is_done:
                 log[f"silo_{i}/done"] = 1
                 log[f"silo_{i}/stop_reason"] = silo.world.stop_reason or "done"
 
-            # Accumulate weighted aggregates
-            if n > 0:
+            if n > 0 and did_train:
                 agg_loss    += m.get("loss",      0.0) * n
                 agg_acc     += m.get("accuracy",  0.0) * n
                 agg_n       += n
                 agg_trained += m.get("trained_on", 0)
 
-        # ── FedAvg ────────────────────────────────────────────────────────────
-        if any(n > 0 for n in round_nexamples):
-            global_weights = _fedavg(round_weights, round_nexamples)
+        # ── FedAvg — only silos that trained contribute updated weights ────────
+        trained_weights  = [w for w, t in zip(round_weights, round_trained) if t]
+        trained_examples = [n for n, t in zip(round_nexamples, round_trained) if t]
+        if trained_weights:
+            global_weights = _fedavg(trained_weights, trained_examples)
+        log["aggregated/silos_trained"] = sum(round_trained)
 
         # ── Early exit if all silos finished ──────────────────────────────────
         if all(silo.world.is_done for silo in silos):
@@ -263,22 +269,27 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 # ── Console progress helper ───────────────────────────────────────────────────
 
 def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
-    agg_loss = log.get("aggregated/loss") or float("nan")
-    agg_acc  = log.get("aggregated/accuracy") or float("nan")
-    n_train  = int(log.get("aggregated/num_trained", 0))
+    agg_loss     = log.get("aggregated/loss") or float("nan")
+    agg_acc      = log.get("aggregated/accuracy") or float("nan")
+    n_trained    = int(log.get("aggregated/num_trained", 0))
+    silos_trained= int(log.get("aggregated/silos_trained", 0))
 
     silo_parts = []
     i = 0
     while f"silo_{i}/sir_i" in log:
-        sir_i = int(log[f"silo_{i}/sir_i"])
-        acc_i = log.get(f"silo_{i}/accuracy", float("nan"))
-        silo_parts.append(f"s{i}[I={sir_i} acc={acc_i:.2f}]")
+        sir_i   = int(log[f"silo_{i}/sir_i"])
+        n_ev    = int(log.get(f"silo_{i}/num_events", 0))
+        did     = "✓" if log.get(f"silo_{i}/trained", 0) else "✗"
+        acc_i   = log.get(f"silo_{i}/accuracy", float("nan"))
+        silo_parts.append(f"s{i}[I={sir_i} ev={n_ev} {did}{acc_i:.2f}]")
         i += 1
 
+    loss_str = f"{agg_loss:.4f}" if agg_loss == agg_loss else "—"
+    acc_str  = f"{agg_acc:.3f}"  if agg_acc  == agg_acc  else "—"
     print(
         f"  Round {round_num:>3}/{total} | "
-        f"loss={agg_loss:.4f} acc={agg_acc:.3f} "
-        f"n={n_train:>4} | "
+        f"loss={loss_str} acc={acc_str} "
+        f"n={n_trained:>4} silos={silos_trained} | "
         f"{' '.join(silo_parts) or '—'} | "
         f"{elapsed:.1f}s"
     )
@@ -291,7 +302,11 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--silos",       type=int,   default=3)
     p.add_argument("--rounds",      type=int,   default=10)
     p.add_argument("--agents",      type=int,   default=30)
-    p.add_argument("--sim-days",    type=int,   default=7)
+    p.add_argument("--sim-days",    type=int,   default=7,
+                   help="Simulated days per FL round")
+    p.add_argument("--min-events",  type=int,   default=10,
+                   dest="min_events_to_train",
+                   help="Skip LoRA training if fewer events collected this round")
     p.add_argument("--epochs",      type=int,   default=3)
     p.add_argument("--batch-size",  type=int,   default=8)
     p.add_argument("--lr",          type=float, default=1e-4)
@@ -318,6 +333,7 @@ def _parse_args() -> FLTrainConfig:
         lora_rank       = a.lora_rank,
         progression     = a.progression,
         seed                = a.seed,
+        min_events_to_train = a.min_events_to_train,
         end_condition       = a.end_condition,
         end_condition_param = a.end_condition_param,
         wandb_project       = a.project,

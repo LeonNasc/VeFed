@@ -38,6 +38,7 @@ class RunConfig:
     num_silos:          int   = 3
     num_rounds:         int   = 10
     sim_days:           int   = 7
+    min_events_to_train: int  = 10
     local_epochs:       int   = 3
     wandb_project:      str   = "fedworld"
     wandb_run_name:     Optional[str] = None
@@ -199,6 +200,13 @@ def _wizard() -> RunConfig:
             sys.exit(0)
         cfg.sim_days = int(sim_days_raw)
 
+        min_ev_raw = questionary.text(
+            "Min events to train per round:", default=str(cfg.min_events_to_train), style=style
+        ).ask()
+        if min_ev_raw is None:
+            sys.exit(0)
+        cfg.min_events_to_train = int(min_ev_raw)
+
         epochs_raw = questionary.text(
             "Local training epochs:", default=str(cfg.local_epochs), style=style
         ).ask()
@@ -255,10 +263,12 @@ def _parse_cli() -> RunConfig:
     p.add_argument("--end-condition-param", type=int, default=90,
                    dest="end_condition_param")
     # FL
-    p.add_argument("--silos",     type=int, default=3)
-    p.add_argument("--rounds",    type=int, default=10)
-    p.add_argument("--sim-days",  type=int, default=7,  dest="sim_days")
-    p.add_argument("--epochs",    type=int, default=3,  dest="local_epochs")
+    p.add_argument("--silos",      type=int, default=3)
+    p.add_argument("--rounds",     type=int, default=10)
+    p.add_argument("--sim-days",   type=int, default=7,   dest="sim_days")
+    p.add_argument("--min-events", type=int, default=10,  dest="min_events_to_train",
+                   help="Skip LoRA training if fewer events this round")
+    p.add_argument("--epochs",     type=int, default=3,   dest="local_epochs")
     p.add_argument("--wandb-project",  default="fedworld",  dest="wandb_project")
     p.add_argument("--wandb-run-name", default=None,         dest="wandb_run_name")
     p.add_argument("--offline",   action="store_true",  dest="wandb_offline")
@@ -272,10 +282,11 @@ def _parse_cli() -> RunConfig:
         disease_strategy   = a.disease_strategy,
         end_condition      = a.end_condition,
         end_condition_param= a.end_condition_param,
-        num_silos          = a.silos,
-        num_rounds         = a.rounds,
-        sim_days           = a.sim_days,
-        local_epochs       = a.local_epochs,
+        num_silos           = a.silos,
+        num_rounds          = a.rounds,
+        sim_days            = a.sim_days,
+        min_events_to_train = a.min_events_to_train,
+        local_epochs        = a.local_epochs,
         wandb_project      = a.wandb_project,
         wandb_run_name     = a.wandb_run_name,
         wandb_offline      = a.wandb_offline,
@@ -361,18 +372,19 @@ def _launch_fl(cfg: RunConfig) -> None:
     from fl.train import FLTrainConfig, run_federated_training
 
     fl_cfg = FLTrainConfig(
-        num_silos           = cfg.num_silos,
-        num_rounds          = cfg.num_rounds,
-        num_agents          = cfg.num_agents,
-        sim_days            = cfg.sim_days,
-        local_epochs        = cfg.local_epochs,
-        progression         = cfg.progression,
-        seed                = cfg.seed,
-        end_condition       = cfg.end_condition,
-        end_condition_param = cfg.end_condition_param,
-        wandb_project       = cfg.wandb_project,
-        wandb_run_name      = cfg.wandb_run_name,
-        wandb_offline       = cfg.wandb_offline,
+        num_silos            = cfg.num_silos,
+        num_rounds           = cfg.num_rounds,
+        num_agents           = cfg.num_agents,
+        sim_days             = cfg.sim_days,
+        min_events_to_train  = cfg.min_events_to_train,
+        local_epochs         = cfg.local_epochs,
+        progression          = cfg.progression,
+        seed                 = cfg.seed,
+        end_condition        = cfg.end_condition,
+        end_condition_param  = cfg.end_condition_param,
+        wandb_project        = cfg.wandb_project,
+        wandb_run_name       = cfg.wandb_run_name,
+        wandb_offline        = cfg.wandb_offline,
     )
     run_federated_training(fl_cfg)
 

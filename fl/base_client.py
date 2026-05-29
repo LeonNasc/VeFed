@@ -54,6 +54,7 @@ class WorldFLClient:
         world: WorldEngine,
         lora_config: Optional[LoRAConfig] = None,
         sim_days: int = 7,
+        min_events_to_train: int = 10,
         local_epochs: int = 3,
         batch_size: int = 8,
         lr: float = 1e-4,
@@ -63,6 +64,7 @@ class WorldFLClient:
         self.world = world
         self.lora_config = lora_config or LoRAConfig()
         self.sim_days = sim_days
+        self.min_events_to_train = min_events_to_train
         self.local_epochs = local_epochs
         self.batch_size = batch_size
         self.lr = lr
@@ -217,23 +219,39 @@ class WorldFLClient:
 
     def run_round(self) -> dict:
         """
-        One complete FL round: simulate → train → evaluate → return metrics.
+        One complete FL round: simulate → (optionally train) → evaluate → metrics.
+
+        LoRA training is skipped when the round yields fewer than
+        `min_events_to_train` events — avoids noisy gradient updates on
+        near-empty batches. The `trained` key signals to the orchestrator
+        whether to include this silo's weights in FedAvg.
 
         Returned dict keys
         ------------------
-        loss, accuracy, num_examples   — post-training eval on this round's events
-        trained_on                     — examples used for training
-        num_events                     — raw events collected this round
-        epoch_losses                   — per-epoch mean training loss list
-        sir_s, sir_i, sir_r            — SIR state after this round's simulation
+        loss, accuracy, num_examples  — eval metrics (NaN / 0 if skipped)
+        trained_on                    — examples used for training (0 if skipped)
+        trained                       — 1 if LoRA was updated, 0 if skipped
+        num_events                    — raw events collected this round
+        epoch_losses                  — per-epoch mean training loss ([] if skipped)
+        sir_s, sir_i, sir_r           — SIR state after simulation
         """
-        events = self.run_simulation_round()
-        n, epoch_losses = self.train_on_events(events)
-        metrics = self.evaluate(events)
-        sir = self.world.sir_model
+        events     = self.run_simulation_round()
+        num_events = len(events)
+        sir        = self.world.sir_model
+
+        if num_events >= self.min_events_to_train:
+            n, epoch_losses = self.train_on_events(events)
+            metrics = self.evaluate(events)
+            trained = 1
+        else:
+            n, epoch_losses = 0, []
+            metrics = {"loss": float("nan"), "accuracy": float("nan"), "num_examples": 0}
+            trained = 0
+
         metrics.update(
             trained_on   = n,
-            num_events   = len(events),
+            trained      = trained,
+            num_events   = num_events,
             epoch_losses = epoch_losses,
             sir_s        = sir.S,
             sir_i        = sir.I,
