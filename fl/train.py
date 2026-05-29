@@ -36,6 +36,8 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -218,6 +220,12 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         f"{'─'*60}\n"
     )
 
+    # ── Report ────────────────────────────────────────────────────────────────
+    from simulation.report import RunReport
+    _run_id    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _report    = RunReport(cfg, _run_id)
+    _report_path = Path(f"reports/run_{_run_id}.html")
+
     # ── Initialise global weights from silo 0 ─────────────────────────────────
     global_weights = silos[0].get_weights()
 
@@ -288,6 +296,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             run.log(log, step=round_num)
             elapsed = time.time() - t0
             _print_round(round_num, cfg.num_rounds, log, elapsed)
+            _report.add_round(round_num, log, [s.last_round_events for s in silos])
             reasons = [silo.world.stop_reason or "done" for silo in silos]
             print(f"\n  All silos finished: {reasons[0]}")
             break
@@ -304,6 +313,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                     log[k] /= agg_n
 
         run.log(log, step=round_num)
+        _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         elapsed = time.time() - t0
         _print_round(round_num, cfg.num_rounds, log, elapsed)
@@ -313,8 +323,11 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         silo.set_weights(global_weights)
 
     run.finish()
+    _report.write(_report_path)
+
     run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
-    print(f"\nTraining complete. W&B: {run_ref}\n")
+    print(f"\nTraining complete. W&B: {run_ref}")
+    print(f"Report:           {_report_path.resolve()}\n")
     return silos
 
 
