@@ -222,10 +222,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 log[f"silo_{i}/stop_reason"] = silo.world.stop_reason or "done"
 
             if n > 0 and did_train:
-                agg_loss    += m.get("loss",      0.0) * n
-                agg_acc     += m.get("accuracy",  0.0) * n
-                agg_n       += n
-                agg_trained += m.get("trained_on", 0)
+                agg_loss     += m.get("loss",             0.0) * n
+                agg_acc      += m.get("accuracy",         0.0) * n
+                agg_n        += n
+                agg_trained  += m.get("trained_on",       0)
+                # Also aggregate sub-metrics weighted by examples
+                for sub in ("icd_exact_acc", "icd_category_acc", "mgmt_acc"):
+                    agg_key = f"aggregated/{sub}"
+                    log[agg_key] = log.get(agg_key, 0.0) + m.get(sub, 0.0) * n
 
         # ── FedAvg — only silos that trained contribute updated weights ────────
         trained_weights  = [w for w, t in zip(round_weights, round_trained) if t]
@@ -246,10 +250,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
         # ── Aggregated log ────────────────────────────────────────────────────
         if agg_n > 0:
-            log["aggregated/loss"]        = agg_loss / agg_n
-            log["aggregated/accuracy"]    = agg_acc  / agg_n
-            log["aggregated/num_examples"]= int(agg_n)
-            log["aggregated/num_trained"] = int(agg_trained)
+            log["aggregated/loss"]             = agg_loss / agg_n
+            log["aggregated/accuracy"]         = agg_acc  / agg_n
+            log["aggregated/num_examples"]     = int(agg_n)
+            log["aggregated/num_trained"]      = int(agg_trained)
+            for sub in ("icd_exact_acc", "icd_category_acc", "mgmt_acc"):
+                k = f"aggregated/{sub}"
+                if k in log:
+                    log[k] /= agg_n
 
         run.log(log, step=round_num)
 
@@ -284,11 +292,14 @@ def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
         silo_parts.append(f"s{i}[I={sir_i} ev={n_ev} {did}{acc_i:.2f}]")
         i += 1
 
-    loss_str = f"{agg_loss:.4f}" if agg_loss == agg_loss else "—"
-    acc_str  = f"{agg_acc:.3f}"  if agg_acc  == agg_acc  else "—"
+    loss_str    = f"{agg_loss:.4f}" if agg_loss == agg_loss else "—"
+    acc_str     = f"{agg_acc:.3f}"  if agg_acc  == agg_acc  else "—"
+    icd_cat_str = f"{log.get('aggregated/icd_category_acc', float('nan')):.2f}"
+    mgmt_str    = f"{log.get('aggregated/mgmt_acc', float('nan')):.2f}"
     print(
         f"  Round {round_num:>3}/{total} | "
         f"loss={loss_str} acc={acc_str} "
+        f"icd={icd_cat_str} mgmt={mgmt_str} "
         f"n={n_trained:>4} silos={silos_trained} | "
         f"{' '.join(silo_parts) or '—'} | "
         f"{elapsed:.1f}s"

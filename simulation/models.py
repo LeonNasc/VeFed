@@ -413,17 +413,24 @@ class Agent:
         )
 
     def build_diagnostic_event(self) -> DiagnosticEvent:
-        # Generate ground truth diagnosis from severity
-        s = self.health_state.severity
-        if s < 0.30:
-            gt = "mild viral infection"
-        elif s < 0.60:
-            gt = "moderate influenza"
-        elif s < 0.80:
-            gt = "severe influenza"
+        s    = self.health_state.severity
+        traj = self.health_state._trajectory
+
+        # ICD-10 code from the trajectory (set at infection time by the strategy)
+        icd = getattr(traj, "icd_code", "B99.9")
+
+        # Management tier driven purely by severity (inner state)
+        if s >= 0.70:
+            management = "hospitalise"
+        elif s >= 0.40:
+            management = "treat"
         else:
-            gt = "critical respiratory infection"
-        
+            management = "home rest"
+
+        # Combined label: the doctor must identify the right disease AND recommend
+        # the correct management.  Accuracy is scored hierarchically on the ICD part.
+        gt = f"{icd} / {management}"
+
         return DiagnosticEvent(
             agent_id      = self.id,
             severity      = self.health_state.severity,

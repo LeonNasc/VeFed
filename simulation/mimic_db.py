@@ -227,6 +227,12 @@ class MimicDiseaseTrajectory:
     Treatment accelerates recovery by applying a cumulative severity reduction.
     """
 
+    _ICD_BY_GROUP: dict[str, str] = {
+        "sepsis":        "A41.9",   # Sepsis, unspecified organism
+        "pneumonia":     "J18.9",   # Pneumonia, unspecified organism
+        "heart_failure": "I50.9",   # Heart failure, unspecified
+    }
+
     def __init__(self, record: MimicRecord, severity_floor_weight: float = 0.20):
         self._record               = record
         self.severity_floor_weight = severity_floor_weight
@@ -234,6 +240,8 @@ class MimicDiseaseTrajectory:
         self._severity     = 0.0
         self._prev_severity = 0.0
         self._treatment_reduction = 0.0   # accumulated from apply_treatment()
+        self.disease_name = f"MIMIC-{record.diagnosis_group}"
+        self.icd_code     = self._ICD_BY_GROUP.get(record.diagnosis_group, "B99.9")
 
     def step(self) -> tuple[float, float]:
         self._prev_severity = self._severity

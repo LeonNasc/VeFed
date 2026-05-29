@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 
 # ─── Trajectory ───────────────────────────────────────────────────────────────
 
+MANAGEMENT_TIERS: tuple[str, ...] = ("home rest", "treat", "hospitalise")
+"""Severity-to-management mapping thresholds (0.0–0.40 / 0.40–0.70 / 0.70+)."""
+
+
 @dataclass
 class DiseaseTrajectory:
     """
@@ -68,6 +72,8 @@ class DiseaseTrajectory:
     decay_rate:            float   # daily fractional drop after peak
     symptom_sensitivity:   float   # slope_component = sensitivity × Δs
     severity_floor_weight: float = 0.25  # floor_component = weight × severity
+    disease_name:          str   = "unknown"  # human-readable; set by strategy
+    icd_code:              str   = "B99.9"    # ICD-10 training target; set by strategy
 
     # Runtime state — updated by step()
     _day:          int   = 0
@@ -167,11 +173,9 @@ class DiseaseProgressionStrategy(ABC):
 # ─── Concrete strategies ──────────────────────────────────────────────────────
 
 class StandardFluProgression(DiseaseProgressionStrategy):
-    """
-    Seasonal influenza — moderate peak, clears in ~10 days.
-    Symmetric-ish bell; patient clearly feels worse then better.
-    """
+    """Seasonal influenza — moderate peak, clears in ~10 days."""
     name        = "Standard Flu"
+    icd_code    = "J11.1"   # Influenza w/ other respiratory manifestations, virus not identified
     description = "Moderate peak (~0.45), clears in ~10 days."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
@@ -181,15 +185,15 @@ class StandardFluProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.18, 0.03, 0.08, 0.35),
             symptom_sensitivity   = self._sample(rng, 3.5,  0.5,  1.5,  6.0),
             severity_floor_weight = 0.25,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 
 class AggressiveFluProgression(DiseaseProgressionStrategy):
-    """
-    High-virulence strain — high peak, slow decay, long illness.
-    Patient feels very ill for 2+ weeks.
-    """
+    """High-virulence novel influenza — high peak, slow decay, long illness."""
     name        = "Aggressive Flu"
+    icd_code    = "J09.X1"  # Novel influenza A virus with pneumonia
     description = "High peak (~0.70), slow decay — ~18 day illness."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
@@ -199,6 +203,8 @@ class AggressiveFluProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.07, 0.02, 0.03, 0.14),
             symptom_sensitivity   = self._sample(rng, 4.0,  0.5,  2.0,  7.0),
             severity_floor_weight = 0.22,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 
@@ -209,16 +215,15 @@ class PersistentFluProgression(DiseaseProgressionStrategy):
     Designed to produce training events across many FL rounds:
       - Quick rise (3 d): agents hit clinic in round 1
       - Moderate-high peak (~0.65): ~35 % of agents cross the 0.70 severity
-        override and seek care every day regardless of σ
-      - Very slow decay (rate ~0.025): illness lasts 5–7 weeks, so later
-        rounds still have data
+        override and seek care regardless of σ
+      - Very slow decay (rate ~0.015): illness lasts 8+ weeks
 
     Intended use: pair with AggressiveFluStrategy (transmission) so the
-    epidemic spreads across the population in the first 1–2 rounds, then
-    agents linger and generate training examples for the remaining rounds.
+    epidemic spreads fast then agents linger across rounds.
     """
     name        = "Persistent Flu"
-    description = "Fast onset (~3 d), moderate-high peak (~0.65), very slow decay — 5–7 week illness."
+    icd_code    = "J10.89"  # Influenza due to other identified virus, other manifestations
+    description = "Fast onset (~3 d), moderate-high peak (~0.65), very slow decay — 8-week illness."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
         return DiseaseTrajectory(
@@ -227,15 +232,15 @@ class PersistentFluProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.015, 0.003, 0.008, 0.025),
             symptom_sensitivity   = self._sample(rng, 4.0,  0.5,  2.0,  6.5),
             severity_floor_weight = 0.25,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 
 class MildCoronaProgression(DiseaseProgressionStrategy):
-    """
-    Mild coronavirus — low peak, broad curve (slow rise AND slow decay),
-    patient feels slightly off for a long time but never very ill.
-    """
+    """Mild coronavirus — low peak, broad shallow curve."""
     name        = "Mild Corona"
+    icd_code    = "U07.2"   # COVID-19, virus not identified
     description = "Low peak (~0.25), broad shallow curve — ~14 days."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
@@ -245,17 +250,18 @@ class MildCoronaProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.10, 0.02, 0.05, 0.20),
             symptom_sensitivity   = self._sample(rng, 2.5,  0.5,  1.0,  5.0),
             severity_floor_weight = 0.20,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 
 class SlowBurnProgression(DiseaseProgressionStrategy):
     """
-    Slow-progressing pathogen — moderate peak, very slow decay.
-    Severity stays high for weeks. Low floor weight preserves the research
-    challenge: plateau symptoms are muted but not zero, so the LLM doctor
-    still receives a weak signal rather than complete silence.
+    Slow-progressing sepsis-like pathogen — moderate peak, very slow decay.
+    Low floor weight preserves the research challenge: plateau σ is muted.
     """
     name        = "Slow Burn"
+    icd_code    = "A41.9"   # Sepsis, unspecified organism
     description = "Moderate peak, very slow decay — weeks-long illness."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
@@ -265,19 +271,18 @@ class SlowBurnProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.03, 0.01, 0.01, 0.07),
             symptom_sensitivity   = self._sample(rng, 3.0,  0.5,  1.5,  5.5),
             severity_floor_weight = 0.15,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 
 class DeadlyProgression(DiseaseProgressionStrategy):
     """
-    Life-threatening disease — very high peak, near-zero decay rate.
-    Severity plateaus near top for an extended period. The very low floor
-    weight (0.12) keeps the plateau signal muted — the patient reports
-    "not getting better" language rather than screaming severity — making
-    this the hardest triage case for the LLM doctor.
-    Patient will NOT recover without treatment (hospitalisation or resolve).
+    Life-threatening pneumonia — very high peak, near-zero decay.
+    Patient will NOT recover without treatment.
     """
     name        = "Deadly"
+    icd_code    = "J18.9"   # Pneumonia, unspecified organism
     description = "Very high peak (~0.88), near-zero decay — fatal without treatment."
 
     def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
@@ -287,6 +292,8 @@ class DeadlyProgression(DiseaseProgressionStrategy):
             decay_rate            = self._sample(rng, 0.01, 0.005, 0.002, 0.025),
             symptom_sensitivity   = self._sample(rng, 4.5,  0.5,  2.5,  7.0),
             severity_floor_weight = 0.12,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
         )
 
 

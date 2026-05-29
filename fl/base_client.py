@@ -21,14 +21,48 @@ import numpy as np
 from simulation.world import WorldEngine
 from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 
-# Maps ground_truth strings (from Agent.build_diagnostic_event) to class indices
-_LABEL_MAP: dict[str, int] = {
-    "mild viral infection":         0,
-    "moderate influenza":           1,
-    "severe influenza":             2,
-    "critical respiratory infection": 3,
-}
-ID2LABEL = {v: k for k, v in _LABEL_MAP.items()}
+MANAGEMENT_TIERS = ("home rest", "treat", "hospitalise")
+
+
+def build_label_map(icd_codes: list[str]) -> tuple[dict[str, int], dict[int, str]]:
+    """
+    Build a label map from a list of ICD codes × 3 management tiers.
+
+    Labels are sorted so the map is deterministic regardless of insertion order —
+    critical for FedAvg: all silos must share the same label-to-index mapping.
+
+    Returns (label2id, id2label).
+    """
+    labels = sorted(
+        f"{icd} / {mgmt}"
+        for icd in sorted(set(icd_codes))
+        for mgmt in MANAGEMENT_TIERS
+    )
+    label2id = {lbl: i for i, lbl in enumerate(labels)}
+    id2label  = {i: lbl for lbl, i in label2id.items()}
+    return label2id, id2label
+
+
+def icd_match_score(pred_label: str, true_label: str) -> float:
+    """
+    Hierarchical ICD match score for one prediction.
+
+    Splits the label on ' / ' to isolate the ICD part, then:
+      exact subcategory match (e.g. J11.1  == J11.1 ) → 1.0
+      3-char category  match  (e.g. J11    == J11.1 ) → 0.5
+      no match                                         → 0.0
+
+    The 3-char threshold mirrors clinical coding practice: codes in the same
+    category represent closely related conditions (e.g. J09.X1, J09.X2 are
+    both novel influenza A with different presentations).
+    """
+    pred_icd = pred_label.split(" / ")[0]
+    true_icd = true_label.split(" / ")[0]
+    if pred_icd == true_icd:
+        return 1.0
+    if pred_icd[:3] == true_icd[:3]:
+        return 0.5
+    return 0.0
 
 
 class WorldFLClient:
@@ -61,15 +95,33 @@ class WorldFLClient:
         device: Optional[str] = None,
     ):
         import torch
-        self.world = world
-        self.lora_config = lora_config or LoRAConfig()
-        self.sim_days = sim_days
+        self.world               = world
+        self.sim_days            = sim_days
         self.min_events_to_train = min_events_to_train
-        self.local_epochs = local_epochs
-        self.batch_size = batch_size
-        self.lr = lr
-        # Auto-select GPU if available, fallback to CPU
+        self.local_epochs        = local_epochs
+        self.batch_size          = batch_size
+        self.lr                  = lr
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Build label map from the ICD codes present in this silo's progression
+        # strategy.  All silos in an experiment must use the same ICD set for
+        # FedAvg to be valid — the orchestrator ensures this via consistent config.
+        icd = getattr(world.progression, "icd_code", None)
+        if icd is None:
+            # MIMIC strategy: enumerate all possible MIMIC ICD codes
+            from simulation.mimic_db import MimicDiseaseTrajectory
+            icd_codes = list(MimicDiseaseTrajectory._ICD_BY_GROUP.values())
+        else:
+            icd_codes = [icd]
+        self._label2id, self._id2label = build_label_map(icd_codes)
+
+        # LoRA config must match the actual number of output classes
+        base_cfg = lora_config or LoRAConfig()
+        if base_cfg.num_labels != len(self._label2id):
+            from dataclasses import replace
+            base_cfg = replace(base_cfg, num_labels=len(self._label2id))
+        self.lora_config = base_cfg
+
         self._model = None  # lazy-built on first use
 
     @property
@@ -102,7 +154,7 @@ class WorldFLClient:
     def _build_dataset(self, events: list) -> tuple[list[str], list[int]]:
         texts, labels = [], []
         for ev in events:
-            label = _LABEL_MAP.get(ev.ground_truth or "")
+            label = self._label2id.get(ev.ground_truth or "")
             if label is None:
                 continue
             patient_turns = [
@@ -182,16 +234,30 @@ class WorldFLClient:
 
     def evaluate(self, events: Optional[list] = None) -> dict:
         """
-        Evaluate LoRA model on events (defaults to all processed events).
-        Returns {"loss": float, "accuracy": float, "num_examples": int}.
+        Evaluate LoRA model on events.
+
+        Returns
+        -------
+        loss, num_examples  — standard metrics
+        icd_exact_acc       — % predictions with exact ICD subcategory match
+        icd_category_acc    — % predictions with 3-char ICD category match (lenient)
+        mgmt_acc            — % predictions with correct management tier
+        accuracy            — combined lenient: ICD category correct AND mgmt correct
+                              (primary metric; this is what we optimise)
+        per_class           — {label: accuracy} for each (icd/mgmt) combination seen
         """
         import torch
+        from collections import defaultdict
         from transformers import AutoTokenizer
 
         events = events or self.world.clinic_queue.processed
         texts, labels = self._build_dataset(events)
         if not texts:
-            return {"loss": 0.0, "accuracy": 0.0, "num_examples": 0}
+            return {
+                "loss": 0.0, "accuracy": 0.0,
+                "icd_exact_acc": 0.0, "icd_category_acc": 0.0,
+                "mgmt_acc": 0.0, "per_class": {}, "num_examples": 0,
+            }
 
         tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
         enc = tokenizer(
@@ -208,11 +274,45 @@ class WorldFLClient:
                 attention_mask=enc["attention_mask"].to(self.device),
                 labels=label_t,
             )
-        acc = (out.logits.argmax(dim=-1) == label_t).float().mean().item()
+
+        preds      = out.logits.argmax(dim=-1).cpu().tolist()
+        true_idxs  = label_t.cpu().tolist()
+
+        icd_exact = icd_cat = mgmt_ok = combined = 0
+        per_class_correct: dict[str, int] = defaultdict(int)
+        per_class_total:   dict[str, int] = defaultdict(int)
+
+        for pred_idx, true_idx in zip(preds, true_idxs):
+            pred_lbl = self._id2label[pred_idx]
+            true_lbl = self._id2label[true_idx]
+
+            pred_icd,  pred_mgmt  = pred_lbl.rsplit(" / ", 1)
+            true_icd,  true_mgmt  = true_lbl.rsplit(" / ", 1)
+
+            exact = pred_icd == true_icd
+            cat   = pred_icd[:3] == true_icd[:3]
+            mgmt  = pred_mgmt == true_mgmt
+
+            icd_exact += exact
+            icd_cat   += cat
+            mgmt_ok   += mgmt
+            combined  += (cat and mgmt)
+
+            per_class_total[true_lbl]   += 1
+            per_class_correct[true_lbl] += int(cat and mgmt)
+
+        n = len(preds)
         return {
-            "loss": float(out.loss),
-            "accuracy": acc,
-            "num_examples": len(texts),
+            "loss":             float(out.loss),
+            "accuracy":         combined / n,          # primary: ICD category + mgmt
+            "icd_exact_acc":    icd_exact / n,
+            "icd_category_acc": icd_cat / n,
+            "mgmt_acc":         mgmt_ok / n,
+            "per_class": {
+                k: per_class_correct[k] / per_class_total[k]
+                for k in per_class_total
+            },
+            "num_examples": n,
         }
 
     # ── Convenience ────────────────────────────────────────────────────────────
