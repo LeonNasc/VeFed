@@ -44,6 +44,7 @@ from fl.lora import LoRAConfig
 from fl.base_client import WorldFLClient
 from simulation.world import WorldEngine
 from simulation.progression import PROGRESSION_STRATEGIES, DiseaseProgressionStrategy
+from simulation.end_conditions import EndCondition, from_config as end_condition_from_config
 
 
 # ── Config dataclass ──────────────────────────────────────────────────────────
@@ -63,6 +64,9 @@ class FLTrainConfig:
     lora_dropout:       float = 0.05
     progression:        str   = "Standard Flu"   # key in PROGRESSION_STRATEGIES
     seed:               int   = 42
+    # End condition
+    end_condition:      str   = "horizon"   # horizon | extinction | no_susceptibles | budget
+    end_condition_param: Optional[int] = None  # max_days | consecutive_days | target_events
     # W&B
     wandb_project:      str   = "fedworld"
     wandb_run_name:     Optional[str] = None
@@ -140,6 +144,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         reinit  = True,
     )
 
+    # ── End condition — one instance per silo (each has independent state) ────
+    def _make_end_condition() -> EndCondition:
+        return end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+
     # ── Create silos ──────────────────────────────────────────────────────────
     lora_cfg = cfg.lora_config()
     silos: list[WorldFLClient] = []
@@ -148,6 +156,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             num_agents           = cfg.num_agents,
             seed                 = cfg.seed + i,
             progression_strategy = progression,
+            end_condition        = _make_end_condition(),
         )
         silos.append(
             WorldFLClient(
@@ -200,9 +209,13 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
             if epoch_losses:
                 log[f"silo_{i}/train_loss_final"] = epoch_losses[-1]
-                # Log each epoch as a W&B table column
                 for ep_i, ep_loss in enumerate(epoch_losses):
                     log[f"silo_{i}/epoch_{ep_i}_loss"] = ep_loss
+
+            # Flag done silos
+            if silo.world.is_done:
+                log[f"silo_{i}/done"] = 1
+                log[f"silo_{i}/stop_reason"] = silo.world.stop_reason or "done"
 
             # Accumulate weighted aggregates
             if n > 0:
@@ -214,6 +227,16 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         # ── FedAvg ────────────────────────────────────────────────────────────
         if any(n > 0 for n in round_nexamples):
             global_weights = _fedavg(round_weights, round_nexamples)
+
+        # ── Early exit if all silos finished ──────────────────────────────────
+        if all(silo.world.is_done for silo in silos):
+            log["aggregated/all_silos_done"] = 1
+            run.log(log, step=round_num)
+            elapsed = time.time() - t0
+            _print_round(round_num, cfg.num_rounds, log, elapsed)
+            reasons = [silo.world.stop_reason or "done" for silo in silos]
+            print(f"\n  All silos finished: {reasons[0]}")
+            break
 
         # ── Aggregated log ────────────────────────────────────────────────────
         if agg_n > 0:
@@ -272,8 +295,12 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--batch-size",  type=int,   default=8)
     p.add_argument("--lr",          type=float, default=1e-4)
     p.add_argument("--lora-rank",   type=int,   default=8)
-    p.add_argument("--progression", type=str,   default="Standard Flu")
-    p.add_argument("--seed",        type=int,   default=42)
+    p.add_argument("--progression",         type=str,   default="Standard Flu")
+    p.add_argument("--seed",                type=int,   default=42)
+    p.add_argument("--end-condition",       type=str,   default="horizon",
+                   choices=["horizon", "extinction", "no_susceptibles", "budget"])
+    p.add_argument("--end-condition-param", type=int,   default=None,
+                   help="max_days / consecutive_days / target_events")
     p.add_argument("--project",     type=str,   default="fedworld")
     p.add_argument("--run-name",    type=str,   default=None)
     p.add_argument("--entity",      type=str,   default=None)
@@ -289,8 +316,10 @@ def _parse_args() -> FLTrainConfig:
         lr              = a.lr,
         lora_rank       = a.lora_rank,
         progression     = a.progression,
-        seed            = a.seed,
-        wandb_project   = a.project,
+        seed                = a.seed,
+        end_condition       = a.end_condition,
+        end_condition_param = a.end_condition_param,
+        wandb_project       = a.project,
         wandb_run_name  = a.run_name,
         wandb_entity    = a.entity,
         wandb_offline   = a.offline,

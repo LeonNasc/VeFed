@@ -28,6 +28,7 @@ from simulation.models import (
     Agent, DailySchedule, DiseaseCloud,
     DiagnosticEvent, HealthStatus, Location, LocationType, SIRModel,
 )
+from simulation.end_conditions import EndCondition
 
 # ─── Wave Function Collapse stub ─────────────────────────────────────────────
 # Full WFC is out of scope; we use a constraint-based random layout that
@@ -189,7 +190,8 @@ class WorldEngine:
 
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
-                 progression_strategy: DiseaseProgressionStrategy | None = None):
+                 progression_strategy: DiseaseProgressionStrategy | None = None,
+                 end_condition: EndCondition | None = None):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
@@ -252,6 +254,11 @@ class WorldEngine:
         self.event_log:    list[str]   = []
         self.paused:       bool        = False
 
+        # End condition
+        self._end_condition: EndCondition | None = end_condition
+        self.is_done:      bool        = False
+        self.stop_reason:  str | None  = None
+
         # FL extension points
         self.fl_round:     int         = 0
         self.fl_log:       list[str]   = []
@@ -281,7 +288,11 @@ class WorldEngine:
         2. Calculate exposure per agent (eq. 2)
         3. Stochastically generate new disease clouds
         4. Decay existing clouds
+
+        Becomes a no-op once is_done is True.
         """
+        if self.is_done:
+            return
         t = self.current_tick
 
         for loc in self.locations.values():
@@ -433,6 +444,15 @@ class WorldEngine:
 
         # SIR observer — do this BEFORE clinic so UI shows updated counts
         self.sir_model.step(self.agents)
+
+        # End condition check (after SIR update so counts are current)
+        if self._end_condition and not self.is_done:
+            if self._end_condition.check(self):
+                self.is_done    = True
+                self.stop_reason = self._end_condition.reason
+                self.event_log.append(
+                    f"Day {self.current_day}: Simulation ended — {self.stop_reason}"
+                )
 
         # Collect symptomatic cases into queue
         cases = self.collect_end_of_day_cases()

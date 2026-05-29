@@ -76,13 +76,19 @@ class WorldFLClient:
 
     def run_simulation_round(self) -> list:
         """
-        Advance the world by sim_days and return newly processed DiagnosticEvents.
-        Uses the world's default (rule-based) diagnostic stub so no LLM is needed
-        during FL training — the LLM role is data generation, not FL itself.
+        Advance the world by up to sim_days and return newly processed DiagnosticEvents.
+
+        Exits early if world.is_done fires (end condition met). Subsequent calls
+        return an empty list immediately so the training loop receives no new
+        events from a finished silo without raising an error.
         """
+        if self.world.is_done:
+            return []
         start = len(self.world.clinic_queue.processed)
         for _ in range(self.sim_days * self.world.TICKS_PER_DAY):
             self.world.step_tick()
+            if self.world.is_done:
+                break
         return self.world.clinic_queue.processed[start:]
 
     # ── Local LoRA training ────────────────────────────────────────────────────
