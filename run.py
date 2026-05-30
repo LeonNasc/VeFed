@@ -485,7 +485,7 @@ def _parse_cli() -> RunConfig:
     )
     p.add_argument("--preset", choices=list(PRESET_DESCRIPTIONS), default=None,
                    help="Load a named preset; other flags override individual fields")
-    p.add_argument("--mode", choices=["tui", "rogue", "pygame", "fl"], default=None)
+    p.add_argument("--mode", choices=["tui", "rogue", "pygame", "fl", "centralized", "compare"], default=None)
     p.add_argument("--agents",   type=int, default=None)
     p.add_argument("--seed",     type=int, default=None)
     p.add_argument("--progressions", nargs="+", default=None,
@@ -561,6 +561,14 @@ def _launch(cfg: RunConfig) -> None:
         _launch_fl(cfg)
         return
 
+    if cfg.mode == "centralized":
+        _launch_centralized(cfg)
+        return
+
+    if cfg.mode == "compare":
+        _launch_compare(cfg)
+        return
+
     end_cond    = make_end_condition(cfg.end_condition, cfg.end_condition_param)
     progressions = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
     strategy    = STRATEGIES.get(cfg.disease_strategy)
@@ -632,10 +640,9 @@ def _launch(cfg: RunConfig) -> None:
         PygameUI(world).run()
 
 
-def _launch_fl(cfg: RunConfig) -> None:
-    from fl.train import FLTrainConfig, run_federated_training
-
-    fl_cfg = FLTrainConfig(
+def _make_fl_cfg(cfg: RunConfig) -> "FLTrainConfig":
+    from fl.train import FLTrainConfig
+    return FLTrainConfig(
         num_silos           = cfg.num_silos,
         max_rounds          = cfg.max_rounds,
         num_agents          = cfg.num_agents,
@@ -655,7 +662,21 @@ def _launch_fl(cfg: RunConfig) -> None:
         beta_scale          = cfg.beta_scale,
         initial_seeds       = cfg.initial_seeds,
     )
-    run_federated_training(fl_cfg)
+
+
+def _launch_fl(cfg: RunConfig) -> None:
+    from fl.train import run_federated_training
+    run_federated_training(_make_fl_cfg(cfg))
+
+
+def _launch_centralized(cfg: RunConfig) -> None:
+    from fl.train import run_centralized_training
+    run_centralized_training(_make_fl_cfg(cfg))
+
+
+def _launch_compare(cfg: RunConfig) -> None:
+    from fl.train import run_comparison
+    run_comparison(_make_fl_cfg(cfg))
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

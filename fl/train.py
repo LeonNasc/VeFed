@@ -316,6 +316,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
     # ── Initialise global weights from silo 0 ─────────────────────────────────
     global_weights = silos[0].get_weights()
+    silos[0].release_model()   # free immediately — rebuilt in round 1 with set_weights
 
     # ── FL rounds — simulation-guided (run until all silos done or max_rounds) ─
     for round_num in range(1, cfg.max_rounds + 1):
@@ -340,6 +341,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 fedavg_n = m.get("num_examples", 0)
 
             round_weights.append(silo.get_weights())
+            silo.release_model()   # free VRAM immediately — only one silo active at a time
             n         = m.get("num_examples", 0)
             did_train = bool(m.get("trained", 0))
             round_nexamples.append(fedavg_n)
@@ -481,6 +483,165 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
         f"{' '.join(silo_parts) or '—'} | "
         f"{elapsed:.1f}s"
     )
+
+
+# ── Centralized baseline ──────────────────────────────────────────────────────
+
+def run_centralized_training(
+    cfg: FLTrainConfig | None = None,
+    **kwargs,
+) -> "CentralizedTrainer":
+    """
+    Centralized oracle: N worlds, all events pooled, one shared model trained.
+
+    Uses identical seeds and world configs as run_federated_training so the
+    comparison is fair.  W&B keys are prefixed 'centralized/' to sit alongside
+    federated metrics in the same dashboard.
+    """
+    if cfg is None:
+        cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
+                                if k in FLTrainConfig.__dataclass_fields__})
+
+    import wandb
+    from simulation.strategies import STRATEGIES
+    from fl.centralized import CentralizedTrainer
+
+    if cfg.wandb_offline:
+        import os
+        os.environ["WANDB_MODE"] = "offline"
+
+    wandb_cfg = {k: v for k, v in __import__("dataclasses").asdict(cfg).items()
+                 if not k.startswith("wandb_") and k != "world_configs"}
+    run = wandb.init(
+        project  = cfg.wandb_project,
+        name     = (cfg.wandb_run_name or "centralized"),
+        entity   = cfg.wandb_entity,
+        config   = wandb_cfg,
+        reinit   = "finish_previous",
+    )
+
+    rng_dirichlet = np.random.default_rng(cfg.seed)
+
+    def _make_world(silo_idx: int) -> "WorldEngine":
+        wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
+        if wc is not None:
+            progs         = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy      = STRATEGIES.get(wc.disease_strategy)
+            end_cond      = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents, bg_rate, bscale = wc.num_agents, wc.background_visit_rate, wc.beta_scale
+            s_offset, rev_icd, n_seeds = wc.seed_offset, wc.reveal_incubating_icd, wc.initial_seeds
+        else:
+            progs    = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy = STRATEGIES.get(cfg.disease_strategy)
+            end_cond = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents, bg_rate, bscale = cfg.num_agents, 0.025, cfg.beta_scale
+            s_offset, rev_icd, n_seeds = 0, True, cfg.initial_seeds
+
+        d_weights = (
+            rng_dirichlet.dirichlet([cfg.dirichlet_alpha] * len(progs)).tolist()
+            if len(progs) > 1 and cfg.dirichlet_alpha > 0 else None
+        )
+        return WorldEngine(
+            num_agents=n_agents, seed=cfg.seed + silo_idx + s_offset,
+            progression_strategies=progs, disease_strategy=strategy,
+            end_condition=end_cond, background_visit_rate=bg_rate,
+            beta_scale=bscale, reveal_incubating_icd=rev_icd,
+            initial_seeds=n_seeds, disease_weights=d_weights,
+        )
+
+    # Build silo clients (worlds only — we ignore their individual models)
+    lora_cfg = cfg.lora_config()
+    silos: list[WorldFLClient] = []
+    for i in range(cfg.num_silos):
+        silos.append(WorldFLClient(
+            world               = _make_world(i),
+            lora_config         = lora_cfg,
+            sim_days            = cfg.sim_days,
+            min_events_to_train = cfg.min_events_to_train,
+        ))
+
+    trainer = CentralizedTrainer(
+        silos               = silos,
+        lora_config         = lora_cfg,
+        local_epochs        = cfg.local_epochs,
+        batch_size          = cfg.batch_size,
+        lr                  = cfg.lr,
+        min_events_to_train = cfg.min_events_to_train,
+    )
+
+    print(
+        f"\n{'─'*60}\n"
+        f"  FedWorld Centralized Training (oracle baseline)\n"
+        f"  silos={cfg.num_silos}  max_rounds={cfg.max_rounds}  agents/silo={cfg.num_agents}\n"
+        f"  sim_days={cfg.sim_days}  local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
+        f"{'─'*60}\n"
+    )
+
+    nan = float("nan")
+    for round_num in range(1, cfg.max_rounds + 1):
+        m = trainer.run_round()
+        m.round_num = round_num
+
+        log = {
+            "round":                        round_num,
+            "centralized/triage_acc":       m.triage_acc,
+            "centralized/diag_acc":         m.diag_acc,
+            "centralized/combined_acc":     m.combined_acc,
+            "centralized/triage_macro_f1":  m.triage_macro_f1,
+            "centralized/danger_rate":      m.danger_rate,
+            "centralized/num_events":       m.num_events,
+            "centralized/trained_on":       m.trained_on,
+            "centralized/loss":             m.loss,
+        }
+        run.log(log, step=round_num)
+
+        def _f(v): return f"{v:.2f}" if v == v else "—"
+        print(
+            f"  Round {round_num:>3}/~{cfg.max_rounds} | "
+            f"loss={m.loss:.4f} tr={_f(m.triage_acc)} diag={_f(m.diag_acc)} "
+            f"f1={_f(m.triage_macro_f1)} danger={_f(m.danger_rate)} "
+            f"ev={m.num_events} trained_on={m.trained_on} | {m.elapsed:.1f}s"
+        )
+
+        if m.all_done:
+            print(f"\n  All silos finished (centralized).")
+            break
+
+    run.finish()
+    return trainer
+
+
+def run_comparison(cfg: FLTrainConfig | None = None, **kwargs) -> dict:
+    """
+    Run federated and centralized training back-to-back with the same config.
+
+    Returns dict with keys 'federated' (list[WorldFLClient]) and
+    'centralized' (CentralizedTrainer) for downstream analysis.
+    """
+    if cfg is None:
+        cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
+                                if k in FLTrainConfig.__dataclass_fields__})
+    print("═" * 60)
+    print("  COMPARISON RUN — Federated")
+    print("═" * 60)
+    fed_run_name  = (cfg.wandb_run_name or "comparison") + "_federated"
+    fed_silos     = run_federated_training(
+        FLTrainConfig(**{**__import__("dataclasses").asdict(cfg),
+                         "wandb_run_name": fed_run_name,
+                         "world_configs": cfg.world_configs})
+    )
+
+    print("═" * 60)
+    print("  COMPARISON RUN — Centralized")
+    print("═" * 60)
+    cen_run_name  = (cfg.wandb_run_name or "comparison") + "_centralized"
+    cen_trainer   = run_centralized_training(
+        FLTrainConfig(**{**__import__("dataclasses").asdict(cfg),
+                         "wandb_run_name": cen_run_name,
+                         "world_configs": cfg.world_configs})
+    )
+
+    return {"federated": fed_silos, "centralized": cen_trainer}
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
