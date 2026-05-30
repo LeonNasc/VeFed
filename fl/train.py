@@ -144,7 +144,8 @@ def _fedavg(
 
 # ── Main training loop ────────────────────────────────────────────────────────
 
-def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[WorldFLClient]:
+def run_federated_training(cfg: FLTrainConfig | None = None,
+                           _shared_tracker=None, **kwargs) -> list[WorldFLClient]:
     """
     Run federated LoRA training across N WorldEngine silos.
 
@@ -308,11 +309,16 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
     # ── Embedding tracker ─────────────────────────────────────────────────────
     from viz.embedding_tracker import EmbeddingTracker
-    print("  [embed] Building benchmark probe set…")
-    _embed_dir = Path(f"viz_output/embeddings/run_{_run_id}")
-    _tracker = EmbeddingTracker(_embed_dir, cfg.lora_config())
-    print(f"  [embed] {len(_tracker.probe_events)} probe events ready "
-          f"({len(set(e.ground_truth for e in _tracker.probe_events))} unique labels)\n")
+    if _shared_tracker is not None:
+        _tracker      = _shared_tracker
+        _own_tracker  = False
+    else:
+        print("  [embed] Building benchmark probe set…")
+        _embed_dir   = Path(f"viz_output/embeddings/run_{_run_id}")
+        _tracker     = EmbeddingTracker(_embed_dir, cfg.lora_config())
+        _own_tracker = True
+        print(f"  [embed] {len(_tracker.probe_events)} probe events ready "
+              f"({len(set(e.ground_truth for e in _tracker.probe_events))} unique labels)\n")
 
     # ── Initialise global weights from silo 0 ─────────────────────────────────
     global_weights = silos[0].get_weights()
@@ -426,11 +432,12 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
     run.finish()
     _report.write(_report_path)
 
-    # ── Save embedding evolution plots ────────────────────────────────────────
-    print("  [embed] Generating evolution plots…")
-    embed_plots = _tracker.save_plots()
-    for p in embed_plots:
-        print(f"  [embed] {p.resolve()}")
+    # ── Save embedding evolution plots (skipped when tracker is shared) ───────
+    if _own_tracker:
+        print("  [embed] Generating evolution plots…")
+        embed_plots = _tracker.save_plots()
+        for p in embed_plots:
+            print(f"  [embed] {p.resolve()}")
 
     run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
     print(f"\nTraining complete. W&B: {run_ref}")
@@ -489,6 +496,7 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
 
 def run_centralized_training(
     cfg: FLTrainConfig | None = None,
+    shared_tracker=None,
     **kwargs,
 ) -> "CentralizedTrainer":
     """
@@ -497,6 +505,13 @@ def run_centralized_training(
     Uses identical seeds and world configs as run_federated_training so the
     comparison is fair.  W&B keys are prefixed 'centralized/' to sit alongside
     federated metrics in the same dashboard.
+
+    Parameters
+    ----------
+    shared_tracker : EmbeddingTracker | None
+        When provided (run_comparison mode), snapshots the centralized model
+        into the same tracker as the federated run so both appear in the same
+        UMAP space and the comparison plot is generated automatically.
     """
     if cfg is None:
         cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
@@ -569,6 +584,23 @@ def run_centralized_training(
         min_events_to_train = cfg.min_events_to_train,
     )
 
+    # ── Report ────────────────────────────────────────────────────────────────
+    from simulation.report import RunReport
+    _run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _report      = RunReport(cfg, _run_id)
+    _report_path = Path(f"reports/run_{_run_id}_centralized.html")
+
+    # ── Embedding tracker (standalone or shared with a federated run) ─────────
+    from viz.embedding_tracker import EmbeddingTracker
+    if shared_tracker is not None:
+        _tracker      = shared_tracker
+        _own_tracker  = False
+    else:
+        _embed_dir    = Path(f"viz_output/embeddings/run_{_run_id}_centralized")
+        _tracker      = EmbeddingTracker(_embed_dir, lora_cfg)
+        _own_tracker  = True
+        print(f"  [embed] {len(_tracker.probe_events)} probe events ready\n")
+
     print(
         f"\n{'─'*60}\n"
         f"  FedWorld Centralized Training (oracle baseline)\n"
@@ -577,10 +609,33 @@ def run_centralized_training(
         f"{'─'*60}\n"
     )
 
-    nan = float("nan")
+    # Dummy global weights for snapshot (centralized has no FedAvg global)
+    # We pass the centralized model's weights as an extra named model so the
+    # tracker records it under "centralized" alongside the federated "global".
+    _dummy_global = silos[0].get_weights()
+    silos[0].release_model()
+
     for round_num in range(1, cfg.max_rounds + 1):
         m = trainer.run_round()
         m.round_num = round_num
+
+        # Snapshot centralized model into tracker each round
+        cen_weights = trainer.get_weights()
+        if _own_tracker:
+            # Standalone centralized run: snapshot with empty silo list,
+            # centralized model stored as "global" for evolution plots
+            _tracker.snapshot(round_num, cen_weights, [],
+                              extra_weights={})
+        else:
+            # Shared tracker: add centralized weights alongside federated ones
+            # (federated run already called snapshot this round — append only
+            # the centralized key to the existing snap dict)
+            existing = _tracker._snapshots.get(round_num, {})
+            if existing:
+                cls, logits = _tracker._extract(cen_weights)
+                existing["centralized"] = {"cls": cls, "logits": logits}
+                _tracker._save_round_npz(round_num, existing)
+        trainer.release_model()
 
         log = {
             "round":                        round_num,
@@ -594,6 +649,7 @@ def run_centralized_training(
             "centralized/loss":             m.loss,
         }
         run.log(log, step=round_num)
+        _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         def _f(v): return f"{v:.2f}" if v == v else "—"
         print(
@@ -608,38 +664,60 @@ def run_centralized_training(
             break
 
     run.finish()
+    _report.write(_report_path)
+    print(f"Report: {_report_path.resolve()}")
+
+    if _own_tracker:
+        plots = _tracker.save_plots()
+        for p in plots:
+            print(f"  [embed] {p.resolve()}")
+
     return trainer
 
 
 def run_comparison(cfg: FLTrainConfig | None = None, **kwargs) -> dict:
     """
-    Run federated and centralized training back-to-back with the same config.
+    Run federated and centralized training back-to-back with the same config
+    and a shared EmbeddingTracker so both models appear in the same UMAP space.
 
+    Produces all standard federated plots plus comparison_fed_vs_centralized.png.
     Returns dict with keys 'federated' (list[WorldFLClient]) and
     'centralized' (CentralizedTrainer) for downstream analysis.
     """
+    import dataclasses
     if cfg is None:
         cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
                                 if k in FLTrainConfig.__dataclass_fields__})
+
+    # One shared tracker so federated and centralized land in the same UMAP
+    from viz.embedding_tracker import EmbeddingTracker
+    from pathlib import Path
+    _run_id    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _embed_dir = Path(f"viz_output/embeddings/run_{_run_id}_comparison")
+    _tracker   = EmbeddingTracker(_embed_dir, cfg.lora_config())
+    print(f"  [embed] Shared tracker — {len(_tracker.probe_events)} probe events\n")
+
     print("═" * 60)
     print("  COMPARISON RUN — Federated")
     print("═" * 60)
-    fed_run_name  = (cfg.wandb_run_name or "comparison") + "_federated"
-    fed_silos     = run_federated_training(
-        FLTrainConfig(**{**__import__("dataclasses").asdict(cfg),
-                         "wandb_run_name": fed_run_name,
-                         "world_configs": cfg.world_configs})
-    )
+    fed_cfg = FLTrainConfig(**{**dataclasses.asdict(cfg),
+                               "wandb_run_name": (cfg.wandb_run_name or "comparison") + "_federated",
+                               "world_configs": cfg.world_configs})
+    fed_silos = run_federated_training(fed_cfg, _shared_tracker=_tracker)
 
     print("═" * 60)
     print("  COMPARISON RUN — Centralized")
     print("═" * 60)
-    cen_run_name  = (cfg.wandb_run_name or "comparison") + "_centralized"
-    cen_trainer   = run_centralized_training(
-        FLTrainConfig(**{**__import__("dataclasses").asdict(cfg),
-                         "wandb_run_name": cen_run_name,
-                         "world_configs": cfg.world_configs})
-    )
+    cen_cfg = FLTrainConfig(**{**dataclasses.asdict(cfg),
+                               "wandb_run_name": (cfg.wandb_run_name or "comparison") + "_centralized",
+                               "world_configs": cfg.world_configs})
+    cen_trainer = run_centralized_training(cen_cfg, shared_tracker=_tracker)
+
+    # Generate all plots now that both models are in the tracker
+    print("  [embed] Generating comparison plots…")
+    plots = _tracker.save_plots()
+    for p in plots:
+        print(f"  [embed] {p.resolve()}")
 
     return {"federated": fed_silos, "centralized": cen_trainer}
 

@@ -209,12 +209,19 @@ class EmbeddingTracker:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def snapshot(self, round_num: int, global_weights: list, silos: list) -> None:
+    def snapshot(self, round_num: int, global_weights: list, silos: list,
+                 extra_weights: dict | None = None) -> None:
         """
         Extract and save CLS embeddings + logits for all models.
 
         Saves per-round .npz files with keys: cls (N,H), logits (N,C), labels (N,).
         In-memory _snapshots stores {"cls": ..., "logits": ...} per model.
+
+        Parameters
+        ----------
+        extra_weights : dict[str, list[np.ndarray]] | None
+            Additional named models to snapshot alongside the federated ones.
+            Key becomes the model name in the .npz and plot (e.g. "centralized").
         """
         from fl.lora import get_lora_weights
 
@@ -228,6 +235,10 @@ class EmbeddingTracker:
         for i, silo in enumerate(silos):
             _record(f"silo_{i}_fed",   silo.get_weights())
             _record(f"silo_{i}_local", get_lora_weights(silo.local_model))
+
+        if extra_weights:
+            for name, weights in extra_weights.items():
+                _record(name, weights)
 
         self._snapshots[round_num] = snap
         self._save_round_npz(round_num, snap)
@@ -303,16 +314,33 @@ class EmbeddingTracker:
         saved.append(self._plot_fl_gain(rounds[-1], n_silos,
                                         icd3_list, unique_icd3, icd_color, plt))
 
+        # ── 5: Federated vs Centralized comparison (only when both present) ──
+        if "centralized" in self._snapshots.get(rounds[-1], {}):
+            saved.append(self._plot_comparison(rounds, icd3_list, unique_icd3,
+                                               icd_color, tier_list, tier_color, plt))
+
         return [p for p in saved if p is not None]
 
-    def _scatter_panel(self, ax, coords, group_list, unique_groups, color_map, plt):
-        """Plot one scatter panel from pre-projected 2D coords."""
+    def _scatter_panel(self, ax, coords, group_list, unique_groups, color_map, plt,
+                       annotate: bool = False):
+        """
+        Plot one scatter panel from pre-projected 2D coords.
+
+        Each ICD group uses its own marker shape (circle = infectious,
+        triangle = non-infectious) so the split is readable without colour alone.
+        When annotate=True, a readable name is drawn at each cluster centroid.
+        """
+        import numpy as np
+        group_arr = np.array(group_list)
         for grp in unique_groups:
-            mask = [g == grp for g in group_list]
+            mask = group_arr == grp
+            marker = ICD3_MARKER.get(grp, "o")
             ax.scatter(coords[mask, 0], coords[mask, 1],
-                       color=color_map[grp], alpha=0.70, s=22, linewidths=0,
-                       label=grp)
+                       color=color_map[grp], alpha=0.75, s=35,
+                       marker=marker, linewidths=0, label=grp)
         ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        if annotate:
+            _annotate_centroids(ax, coords, group_list, unique_groups, color_map)
 
     def _plot_evolution_global(self, rounds, pca, colors, unique_icd3, icd_color, plt) -> Optional[Path]:
         """Rows/cols grid: global model at each round."""
@@ -362,7 +390,10 @@ class EmbeddingTracker:
             ax   = axes_flat[ax_i]
             data = self._snapshots[rnd]["global"][space]
             coords = _project(data)
-            self._scatter_panel(ax, coords, group_list, unique_groups, color_map, plt)
+            # Annotate centroids only from round 3 onwards — before that the
+            # clusters are not stable enough for centroid labels to be meaningful.
+            self._scatter_panel(ax, coords, group_list, unique_groups, color_map, plt,
+                                annotate=(rnd >= 3))
             ax.set_title(f"Round {rnd}", fontsize=8)
 
         for ax in axes_flat[len(rounds):]:
@@ -398,7 +429,8 @@ class EmbeddingTracker:
             ]):
                 ax = axes[row, col]
                 group_list = icd3_list if row == 0 else tier_list
-                self._scatter_panel(ax, coords, group_list, groups, cmap, plt)
+                self._scatter_panel(ax, coords, group_list, groups, cmap, plt,
+                                    annotate=(row == 0))
                 if col == 0:
                     ax.set_ylabel(row_labels[row], fontsize=8)
                 if row == 0:
@@ -430,7 +462,8 @@ class EmbeddingTracker:
                     continue
                 ax     = axes[row, col]
                 coords = _project(snap[key]["logits"])
-                self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt)
+                self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt,
+                                    annotate=True)
                 if col == 0:
                     ax.set_ylabel("Federated" if row == 0 else "Local-only", fontsize=8)
                 if row == 0:
@@ -444,10 +477,101 @@ class EmbeddingTracker:
         return path
 
 
-# ── Legend helper ─────────────────────────────────────────────────────────────
+    def _plot_comparison(self, rounds, icd3_list, unique_icd3, icd_color,
+                         tier_list, tier_color, plt) -> Optional[Path]:
+        """
+        Two-row grid: federated global vs centralized model, one column per round.
+        Row 0 coloured by disease, Row 1 coloured by management tier.
+        Allows direct visual comparison of learned geometry across rounds.
+        """
+        last = rounds[-1]
+        # Use rounds where both models have snapshots
+        cmp_rounds = [r for r in rounds if "centralized" in self._snapshots.get(r, {})]
+        if not cmp_rounds:
+            return None
+
+        cols = len(cmp_rounds)
+        fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5),
+                                 constrained_layout=True)
+        if cols == 1:
+            axes = axes.reshape(2, 1)
+
+        row_labels = ["Federated (global)", "Centralized (oracle)"]
+        for col, rnd in enumerate(cmp_rounds):
+            snap = self._snapshots[rnd]
+            for row, key in enumerate(["global", "centralized"]):
+                ax     = axes[row, col]
+                coords = _project(snap[key]["logits"])
+                self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt,
+                                    annotate=(rnd == cmp_rounds[-1]))
+                if col == 0:
+                    ax.set_ylabel(row_labels[row], fontsize=8)
+                if row == 0:
+                    ax.set_title(f"Round {rnd}", fontsize=8)
+
+        _add_legend(fig, unique_icd3, icd_color, ncol=4)
+        fig.suptitle("Federated vs Centralized — logit-space UMAP per round", fontsize=10)
+        path = self.output_dir / "comparison_fed_vs_centralized.png"
+        fig.savefig(path, dpi=130)
+        plt.close(fig)
+        return path
+
+
+# ── Label helpers ─────────────────────────────────────────────────────────────
+
+# Human-readable names for the legend and centroid annotations.
+# Keyed by ICD-3 prefix; falls back to the raw code if not found.
+ICD3_NAMES: dict[str, str] = {
+    "A41": "Sepsis",
+    "A99": "Benchmark fever",
+    "F41": "Anxiety",
+    "J11": "Flu",
+    "M54": "Back pain",
+    "R51": "Headache",
+    "R53": "Fatigue",
+    "U07": "Corona",
+    "Z87": "Hypertension f/u",
+}
+
+# Infectious diseases use filled circles; non-infectious use triangles.
+# Makes the infectious / non-infectious split readable without colour alone.
+ICD3_MARKER: dict[str, str] = {
+    "A41": "o",   # Sepsis — infectious
+    "A99": "o",   # Benchmark fever — infectious
+    "J11": "o",   # Flu — infectious
+    "U07": "o",   # Corona — infectious
+    "F41": "^",   # Anxiety — non-infectious
+    "M54": "^",   # Back pain — non-infectious
+    "R51": "^",   # Headache — non-infectious
+    "R53": "^",   # Fatigue — non-infectious
+    "Z87": "^",   # Hypertension — non-infectious
+}
+
 
 def _add_legend(fig, unique_groups: list, color_map: dict, ncol: int = 7) -> None:
     import matplotlib.patches as mpatches
-    patches = [mpatches.Patch(color=color_map[g], label=g) for g in unique_groups]
+    patches = [
+        mpatches.Patch(color=color_map[g], label=ICD3_NAMES.get(g, g))
+        for g in unique_groups
+    ]
     fig.legend(handles=patches, loc="lower center", ncol=min(ncol, len(unique_groups)),
-               fontsize=7, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
+               fontsize=8, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
+
+
+def _annotate_centroids(ax, coords: "np.ndarray", group_list: list,
+                        unique_groups: list, color_map: dict) -> None:
+    """Draw a readable name at the centroid of each ICD cluster."""
+    import numpy as np
+    for grp in unique_groups:
+        mask = np.array([g == grp for g in group_list])
+        if not mask.any():
+            continue
+        cx, cy = coords[mask, 0].mean(), coords[mask, 1].mean()
+        name = ICD3_NAMES.get(grp, grp)
+        ax.text(
+            cx, cy, name,
+            fontsize=6, ha="center", va="center", fontweight="bold",
+            color="white",
+            bbox=dict(boxstyle="round,pad=0.15", fc=color_map[grp],
+                      ec="none", alpha=0.80),
+        )
