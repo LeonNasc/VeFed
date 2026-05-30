@@ -288,7 +288,7 @@ class EmbeddingTracker:
             raw = self._snapshots[rnd]["global"]
             coords = pca.transform(raw)
             for icd in unique_icd3:
-                mask = [c == icd for c in [l.split(" / ")[0][:3] if " / " in l else l[:3] for l in self._probe_labels]]
+                mask = self._icd3_mask(icd)
                 ax.scatter(coords[mask, 0], coords[mask, 1],
                            color=icd_color[icd], alpha=0.65, s=18, linewidths=0)
             ax.set_title(f"Round {rnd}", fontsize=8)
@@ -306,6 +306,13 @@ class EmbeddingTracker:
         plt.close(fig)
         return path
 
+    def _icd3_mask(self, icd: str) -> list[bool]:
+        """Boolean mask for probe events whose ICD 3-char prefix matches icd."""
+        return [
+            (lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3]) == icd
+            for lbl in self._probe_labels
+        ]
+
     def _plot_final_all(self, last_round, n_silos, pca, colors, unique_icd3, icd_color, plt) -> Optional[Path]:
         """Final round: global + each silo fed model."""
         snap = self._snapshots[last_round]
@@ -320,8 +327,7 @@ class EmbeddingTracker:
         for ax, key in zip(axes, model_keys):
             coords = pca.transform(snap[key])
             for icd in unique_icd3:
-                mask = [l.split(" / ")[0][:3] if " / " in l else l[:3] == icd
-                        for l in self._probe_labels]
+                mask = self._icd3_mask(icd)
                 ax.scatter(coords[mask, 0], coords[mask, 1],
                            color=icd_color[icd], alpha=0.65, s=18, linewidths=0)
             label = "Global" if key == "global" else f"Silo {key.split('_')[1]} (fed)"
@@ -357,8 +363,7 @@ class EmbeddingTracker:
                 ax = axes[row, col]
                 coords = pca.transform(snap[key])
                 for icd in unique_icd3:
-                    mask = [l.split(" / ")[0][:3] if " / " in l else l[:3] == icd
-                            for l in self._probe_labels]
+                    mask = self._icd3_mask(icd)
                     ax.scatter(coords[mask, 0], coords[mask, 1],
                                color=icd_color[icd], alpha=0.65, s=18, linewidths=0)
                 ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
