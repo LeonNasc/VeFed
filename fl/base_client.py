@@ -341,6 +341,29 @@ class WorldFLClient:
 
         n_hosp_true = triage_tp["hospitalise"] + triage_fn["hospitalise"]
 
+        # Doctor LLM performance metrics (only meaningful when Ollama is active)
+        gt_to_action = {
+            "home rest":   "RECOVER",
+            "treat":       "RESOLVE",
+            "hospitalise": "HOSPITALISE",
+        }
+        turns_list = [ev.num_turns for ev in events if ev.num_turns > 0]
+        action_correct = 0
+        action_total   = 0
+        for ev in events:
+            if ev.num_turns == 0 or not ev.ground_truth or ev.action is None:
+                continue
+            gt_mgmt = ev.ground_truth.rsplit(" / ", 1)[-1]
+            expected = gt_to_action.get(gt_mgmt)
+            if expected is not None:
+                action_total   += 1
+                action_correct += int(ev.action.name == expected)
+
+        avg_turns       = sum(turns_list) / len(turns_list) if turns_list else float("nan")
+        # Ideal flow = question → vitals → decision = exactly 3 LLM calls
+        first_turn_rate = sum(1 for t in turns_list if t <= 3) / len(turns_list) if turns_list else float("nan")
+        action_accuracy = action_correct / action_total if action_total > 0 else float("nan")
+
         return {
             "loss":             float(out.loss),
             "num_examples":     n,
@@ -355,6 +378,9 @@ class WorldFLClient:
                 k: per_class_correct[k] / per_class_total[k]
                 for k in per_class_total
             },
+            "avg_turns":        avg_turns,
+            "first_turn_rate":  first_turn_rate,
+            "action_accuracy":  action_accuracy,
         }
 
     # ── Memory management ──────────────────────────────────────────────────────

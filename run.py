@@ -350,6 +350,57 @@ def _wizard() -> RunConfig:
             if silos_raw is None:
                 sys.exit(0)
             cfg.num_silos = int(silos_raw)
+
+            # ── Non-IID per-silo configuration ────────────────────────────────
+            noniid = questionary.confirm(
+                "Configure each silo separately (non-IID)?",
+                default=False, style=style,
+            ).ask()
+            if noniid is None:
+                sys.exit(0)
+
+            if noniid:
+                from fl.train import WorldConfig
+                from simulation.progression import PROGRESSION_STRATEGIES
+                world_cfgs = []
+                print()
+                for silo_i in range(cfg.num_silos):
+                    print(f"  — Silo {silo_i} configuration —")
+                    s_progs = questionary.checkbox(
+                        f"  Silo {silo_i} disease progressions:",
+                        choices=[
+                            questionary.Choice(name, checked=(name in cfg.progressions))
+                            for name in PROGRESSION_STRATEGIES
+                        ],
+                        style=style,
+                    ).ask()
+                    if not s_progs:
+                        sys.exit(0)
+
+                    s_agents_raw = questionary.text(
+                        f"  Silo {silo_i} agents:", default=str(cfg.num_agents), style=style
+                    ).ask()
+                    if s_agents_raw is None:
+                        sys.exit(0)
+
+                    s_beta_raw = questionary.text(
+                        f"  Silo {silo_i} beta_scale (transmission multiplier):",
+                        default="1.0", style=style,
+                    ).ask()
+                    if s_beta_raw is None:
+                        sys.exit(0)
+
+                    world_cfgs.append(WorldConfig(
+                        num_agents       = int(s_agents_raw),
+                        progressions     = s_progs,
+                        disease_strategy = s_progs[0],
+                        beta_scale       = float(s_beta_raw),
+                        end_condition    = cfg.end_condition,
+                        end_condition_param = cfg.end_condition_param,
+                    ))
+                    print()
+
+                cfg.world_configs = world_cfgs
         else:
             print(f"  Silos: {cfg.num_silos} (from preset world_configs)")
 

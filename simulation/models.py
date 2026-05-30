@@ -270,6 +270,7 @@ class DiagnosticEvent:
     diagnosis:      Optional[str] = None       # LLM's diagnosis text
     ground_truth:   Optional[str] = None       # Actual diagnosis for accuracy
     is_background:  bool          = False      # True for worried-well / routine-check visitors
+    num_turns:      int           = 0          # LLM doctor turns used (0 = no LLM)
 
 
 # ─── Agent ────────────────────────────────────────────────────────────────────

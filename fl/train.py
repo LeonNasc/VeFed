@@ -329,7 +329,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 agg_n       += n
                 agg_trained += m.get("trained_on", 0)
                 for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
-                            "combined_acc", "triage_macro_f1", "danger_rate"):
+                            "combined_acc", "triage_macro_f1", "danger_rate",
+                            "avg_turns", "first_turn_rate", "action_accuracy"):
                     v = m.get(sub, float("nan"))
                     if v == v:
                         agg_key = f"aggregated/{sub}"
@@ -365,7 +366,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             log["aggregated/num_examples"] = int(agg_n)
             log["aggregated/num_trained"]  = int(agg_trained)
             for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
-                        "combined_acc", "triage_macro_f1", "danger_rate"):
+                        "combined_acc", "triage_macro_f1", "danger_rate",
+                        "avg_turns", "first_turn_rate", "action_accuracy"):
                 k = f"aggregated/{sub}"
                 if k in log:
                     log[k] /= agg_n
@@ -398,6 +400,8 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
     diag        = log.get("aggregated/diag_acc",        nan)
     macro_f1    = log.get("aggregated/triage_macro_f1", nan)
     danger      = log.get("aggregated/danger_rate",     nan)
+    avg_turns   = log.get("aggregated/avg_turns",       nan)
+    act_acc     = log.get("aggregated/action_accuracy", nan)
     n_trained   = int(log.get("aggregated/num_trained", 0))
     silos_tr    = int(log.get("aggregated/silos_trained", 0))
 
@@ -423,6 +427,7 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
         f"loss={_fmt(agg_loss,4)} "
         f"triage={_fmt(triage)} diag={_fmt(diag)} "
         f"f1={_fmt(macro_f1)} danger={_fmt(danger)} "
+        f"dr_turns={_fmt(avg_turns,1)} dr_act={_fmt(act_acc)} "
         f"n={n_trained:>4} silos={silos_tr} | "
         f"{' '.join(silo_parts) or '—'} | "
         f"{elapsed:.1f}s"

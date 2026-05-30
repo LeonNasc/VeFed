@@ -140,6 +140,7 @@ class OllamaDiagnosticClient:
                 })
                 break
 
+        event.num_turns = turn
         return event
 
     def update_examples(self, events: list, max_per_tier: int = 2) -> None:
