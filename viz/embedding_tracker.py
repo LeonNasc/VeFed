@@ -94,19 +94,23 @@ def generate_probe_events(
     return all_events
 
 
-# ── CLS extraction (re-exported from disease_viz for convenience) ─────────────
+# ── Forward pass: CLS hidden states + logits ─────────────────────────────────
 
-def _extract_cls(model, events: list, tokenizer) -> np.ndarray:
-    """Forward events through model, return CLS hidden states (N, H)."""
+def _forward(model, events: list, tokenizer) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Single forward pass through model for all probe events.
+
+    Returns
+    -------
+    cls    (N, H)   — CLS token from the last hidden layer
+    logits (N, C)   — raw classifier logits (C = num_labels)
+    """
     import torch
 
     texts = []
     for ev in events:
         turns = [t["text"] for t in ev.conversation if t["role"] == "patient"]
-        if turns:
-            texts.append(turns[-1])
-        else:
-            texts.append("")
+        texts.append(turns[-1] if turns else "")
 
     enc = tokenizer(
         texts, padding=True, truncation=True,
@@ -119,7 +123,27 @@ def _extract_cls(model, events: list, tokenizer) -> np.ndarray:
             attention_mask=enc["attention_mask"],
             output_hidden_states=True,
         )
-    return out.hidden_states[-1][:, 0, :].cpu().numpy()
+    cls    = out.hidden_states[-1][:, 0, :].cpu().numpy()
+    logits = out.logits.cpu().numpy()
+    return cls, logits
+
+
+def _project(data: np.ndarray, method: str = "umap", seed: int = 42) -> np.ndarray:
+    """
+    2-D projection of high-dimensional embeddings.
+
+    method : "umap" (preferred) or "pca" (fallback).
+    """
+    if method == "umap":
+        try:
+            import umap as umap_lib
+            reducer = umap_lib.UMAP(n_components=2, random_state=seed,
+                                    n_neighbors=15, min_dist=0.1)
+            return reducer.fit_transform(data)
+        except Exception:
+            pass
+    from sklearn.decomposition import PCA
+    return PCA(n_components=2).fit_transform(data)
 
 
 # ── Tracker ───────────────────────────────────────────────────────────────────
@@ -177,31 +201,33 @@ class EmbeddingTracker:
 
     # ── Core extraction ───────────────────────────────────────────────────────
 
-    def _extract(self, weights: list) -> np.ndarray:
+    def _extract(self, weights: list) -> tuple[np.ndarray, np.ndarray]:
+        """Load weights, return (cls (N,H), logits (N,C))."""
         from fl.lora import set_lora_weights
         set_lora_weights(self._model, weights)
-        return _extract_cls(self._model, self.probe_events, self._tok)
+        return _forward(self._model, self.probe_events, self._tok)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def snapshot(self, round_num: int, global_weights: list, silos: list) -> None:
         """
-        Extract and save embeddings for the global model and all silos.
+        Extract and save CLS embeddings + logits for all models.
 
-        Parameters
-        ----------
-        round_num      : FL round index (1-based).
-        global_weights : FedAvg-aggregated weights.
-        silos          : list[WorldFLClient].
+        Saves per-round .npz files with keys: cls (N,H), logits (N,C), labels (N,).
+        In-memory _snapshots stores {"cls": ..., "logits": ...} per model.
         """
         from fl.lora import get_lora_weights
 
-        snap: dict[str, np.ndarray] = {}
+        snap: dict[str, dict] = {}
 
-        snap["global"] = self._extract(global_weights)
+        def _record(name, weights):
+            cls, logits = self._extract(weights)
+            snap[name] = {"cls": cls, "logits": logits}
+
+        _record("global", global_weights)
         for i, silo in enumerate(silos):
-            snap[f"silo_{i}_fed"]   = self._extract(silo.get_weights())
-            snap[f"silo_{i}_local"] = self._extract(get_lora_weights(silo.local_model))
+            _record(f"silo_{i}_fed",   silo.get_weights())
+            _record(f"silo_{i}_local", get_lora_weights(silo.local_model))
 
         self._snapshots[round_num] = snap
         self._save_round_npz(round_num, snap)
@@ -214,15 +240,19 @@ class EmbeddingTracker:
         rd = self.output_dir / f"round_{round_num:03d}"
         rd.mkdir(parents=True, exist_ok=True)
         labels = np.array(self._probe_labels)
-        for name, raw in snap.items():
-            np.savez(rd / f"{name}.npz", raw=raw, labels=labels)
+        for name, d in snap.items():
+            np.savez(rd / f"{name}.npz", cls=d["cls"], logits=d["logits"], labels=labels)
 
     # ── Plot generation ───────────────────────────────────────────────────────
 
     def save_plots(self) -> list[Path]:
         """
-        Generate the three summary plots using a single shared PCA space.
-        Returns list of saved PNG paths.
+        Generate four summary plots. Uses UMAP (PCA fallback) per-plot.
+
+        1. evolution_global_cls.png   — global CLS embeddings, one subplot per round
+        2. evolution_global_logits.png — same but in logit space (more discriminative)
+        3. final_all_models.png       — final round, all models, logit-space UMAP
+        4. fl_gain_final.png          — final round, fed vs local per silo, logit-space
         """
         if not self._snapshots:
             return []
@@ -231,47 +261,58 @@ class EmbeddingTracker:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
-            from sklearn.decomposition import PCA
         except ImportError as exc:
-            raise ImportError("pip install matplotlib scikit-learn") from exc
+            raise ImportError("pip install matplotlib") from exc
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        rounds   = sorted(self._snapshots)
-        n_silos  = sum(1 for k in self._snapshots[rounds[0]] if k.startswith("silo_") and k.endswith("_fed"))
-        labels   = np.array(self._probe_labels)
+        rounds  = sorted(self._snapshots)
+        n_silos = sum(1 for k in self._snapshots[rounds[0]]
+                      if k.startswith("silo_") and k.endswith("_fed"))
+        labels  = np.array(self._probe_labels)
 
-        # ── Fit shared PCA on ALL embeddings combined ─────────────────────────
-        all_raw = np.vstack([
-            raw
-            for snap in self._snapshots.values()
-            for raw in snap.values()
-        ])
-        pca = PCA(n_components=2)
-        pca.fit(all_raw)
+        # Colour maps
+        icd3_list   = [(lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3])
+                       for lbl in self._probe_labels]
+        tier_list   = [(lbl.rsplit(" / ", 1)[-1] if " / " in lbl else "unknown")
+                       for lbl in self._probe_labels]
 
-        def _proj(raw: np.ndarray) -> np.ndarray:
-            return pca.transform(raw)
-
-        # Disease colour map: colour by ICD (first 3 chars) ignoring tier
-        icd3_list = [lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3] for lbl in labels]
         unique_icd3 = sorted(set(icd3_list))
-        cmap = plt.cm.get_cmap("tab10", len(unique_icd3))
-        icd_color = {icd: cmap(i) for i, icd in enumerate(unique_icd3)}
-        colors = [icd_color[icd] for icd in icd3_list]
+        unique_tier = ["home rest", "treat", "hospitalise"]
+        cmap_icd  = plt.cm.get_cmap("tab10", len(unique_icd3))
+        cmap_tier = plt.cm.get_cmap("Set1",  3)
+        icd_color  = {icd:  cmap_icd(i)  for i, icd  in enumerate(unique_icd3)}
+        tier_color = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
 
         saved: list[Path] = []
 
-        # ── 1. Global model evolution ─────────────────────────────────────────
-        saved.append(self._plot_evolution_global(rounds, pca, colors, unique_icd3, icd_color, plt))
+        # ── 1 & 2: Global model evolution in CLS and logit space ─────────────
+        for space in ("cls", "logits"):
+            saved.append(
+                self._plot_evolution(rounds, space, icd3_list, unique_icd3, icd_color, plt,
+                                     fname=f"evolution_global_{space}.png",
+                                     title_suffix="CLS hidden states" if space == "cls" else "logit space")
+            )
 
-        # ── 2. Final round — all models ───────────────────────────────────────
-        saved.append(self._plot_final_all(rounds[-1], n_silos, pca, colors, unique_icd3, icd_color, plt))
+        # ── 3: Final round — all models in logit space, coloured by disease ──
+        saved.append(self._plot_final_all(rounds[-1], n_silos,
+                                          icd3_list, unique_icd3, icd_color,
+                                          tier_list, tier_color, plt))
 
-        # ── 3. FL gain — fed vs local per silo ───────────────────────────────
-        saved.append(self._plot_fl_gain(rounds[-1], n_silos, pca, colors, unique_icd3, icd_color, plt))
+        # ── 4: FL gain — fed vs local per silo, logit space ──────────────────
+        saved.append(self._plot_fl_gain(rounds[-1], n_silos,
+                                        icd3_list, unique_icd3, icd_color, plt))
 
         return [p for p in saved if p is not None]
+
+    def _scatter_panel(self, ax, coords, group_list, unique_groups, color_map, plt):
+        """Plot one scatter panel from pre-projected 2D coords."""
+        for grp in unique_groups:
+            mask = [g == grp for g in group_list]
+            ax.scatter(coords[mask, 0], coords[mask, 1],
+                       color=color_map[grp], alpha=0.70, s=22, linewidths=0,
+                       label=grp)
+        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
     def _plot_evolution_global(self, rounds, pca, colors, unique_icd3, icd_color, plt) -> Optional[Path]:
         """Rows/cols grid: global model at each round."""
@@ -306,45 +347,74 @@ class EmbeddingTracker:
         plt.close(fig)
         return path
 
-    def _icd3_mask(self, icd: str) -> list[bool]:
-        """Boolean mask for probe events whose ICD 3-char prefix matches icd."""
-        return [
-            (lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3]) == icd
-            for lbl in self._probe_labels
-        ]
+    def _plot_evolution(self, rounds, space, group_list, unique_groups, color_map,
+                        plt, fname, title_suffix) -> Optional[Path]:
+        """Small-multiples grid: global model at each round in a given embedding space."""
+        n    = len(rounds)
+        cols = min(5, n)
+        rows = (n + cols - 1) // cols
 
-    def _plot_final_all(self, last_round, n_silos, pca, colors, unique_icd3, icd_color, plt) -> Optional[Path]:
-        """Final round: global + each silo fed model."""
-        snap = self._snapshots[last_round]
-        model_keys = ["global"] + [f"silo_{i}_fed" for i in range(n_silos)]
-        model_keys = [k for k in model_keys if k in snap]
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.2, rows * 3.0),
+                                 constrained_layout=True)
+        axes_flat = np.array(axes).flatten() if n > 1 else [axes]
 
-        cols = len(model_keys)
-        fig, axes = plt.subplots(1, cols, figsize=(cols * 3.2, 3.5), constrained_layout=True)
+        for ax_i, rnd in enumerate(rounds):
+            ax   = axes_flat[ax_i]
+            data = self._snapshots[rnd]["global"][space]
+            coords = _project(data)
+            self._scatter_panel(ax, coords, group_list, unique_groups, color_map, plt)
+            ax.set_title(f"Round {rnd}", fontsize=8)
+
+        for ax in axes_flat[len(rounds):]:
+            ax.set_visible(False)
+
+        _add_legend(fig, unique_groups, color_map)
+        fig.suptitle(f"Global model evolution — {title_suffix}\n(UMAP per round)", fontsize=10)
+        path = self.output_dir / fname
+        fig.savefig(path, dpi=130)
+        plt.close(fig)
+        return path
+
+    def _plot_final_all(self, last_round, n_silos, icd3_list, unique_icd3, icd_color,
+                        tier_list, tier_color, plt) -> Optional[Path]:
+        """Final round: global + each silo's fed model. Two rows: by disease / by tier."""
+        snap      = self._snapshots[last_round]
+        mod_keys  = ["global"] + [f"silo_{i}_fed" for i in range(n_silos)]
+        mod_keys  = [k for k in mod_keys if k in snap]
+        cols      = len(mod_keys)
+
+        fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5), constrained_layout=True)
         if cols == 1:
-            axes = [axes]
+            axes = axes.reshape(2, 1)
 
-        for ax, key in zip(axes, model_keys):
-            coords = pca.transform(snap[key])
-            for icd in unique_icd3:
-                mask = self._icd3_mask(icd)
-                ax.scatter(coords[mask, 0], coords[mask, 1],
-                           color=icd_color[icd], alpha=0.65, s=18, linewidths=0)
-            label = "Global" if key == "global" else f"Silo {key.split('_')[1]} (fed)"
-            ax.set_title(label, fontsize=8)
-            ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        row_labels = ["by disease (ICD)", "by management tier"]
 
-        _add_legend(fig, unique_icd3, icd_color)
-        var = pca.explained_variance_ratio_
-        fig.suptitle(f"Round {last_round} — all federated models\nPC1={var[0]:.1%}  PC2={var[1]:.1%}",
-                     fontsize=10)
+        for col, key in enumerate(mod_keys):
+            data   = snap[key]["logits"]
+            coords = _project(data)
+            for row, (groups, cmap) in enumerate([
+                (unique_icd3, icd_color),
+                (["home rest", "treat", "hospitalise"], tier_color),
+            ]):
+                ax = axes[row, col]
+                group_list = icd3_list if row == 0 else tier_list
+                self._scatter_panel(ax, coords, group_list, groups, cmap, plt)
+                if col == 0:
+                    ax.set_ylabel(row_labels[row], fontsize=8)
+                if row == 0:
+                    label = "Global" if key == "global" else f"Silo {key.split('_')[1]}"
+                    ax.set_title(label, fontsize=8)
+
+        _add_legend(fig, unique_icd3, icd_color, ncol=4)
+        fig.suptitle(f"Round {last_round} — all federated models (logit-space UMAP)", fontsize=10)
         path = self.output_dir / "final_all_models.png"
         fig.savefig(path, dpi=130)
         plt.close(fig)
         return path
 
-    def _plot_fl_gain(self, last_round, n_silos, pca, colors, unique_icd3, icd_color, plt) -> Optional[Path]:
-        """Final round: fed vs local overlay per silo (2 rows × n_silos cols)."""
+    def _plot_fl_gain(self, last_round, n_silos, icd3_list, unique_icd3,
+                      icd_color, plt) -> Optional[Path]:
+        """Final round: federated vs local-only per silo (logit-space UMAP)."""
         snap = self._snapshots[last_round]
 
         fig, axes = plt.subplots(2, n_silos, figsize=(n_silos * 3.0, 6.5),
@@ -352,30 +422,22 @@ class EmbeddingTracker:
         if n_silos == 1:
             axes = axes.reshape(2, 1)
 
-        row_labels = ["Federated", "Local-only"]
-
         for col, i in enumerate(range(n_silos)):
             for row, suffix in enumerate(["_fed", "_local"]):
                 key = f"silo_{i}{suffix}"
                 if key not in snap:
                     axes[row, col].set_visible(False)
                     continue
-                ax = axes[row, col]
-                coords = pca.transform(snap[key])
-                for icd in unique_icd3:
-                    mask = self._icd3_mask(icd)
-                    ax.scatter(coords[mask, 0], coords[mask, 1],
-                               color=icd_color[icd], alpha=0.65, s=18, linewidths=0)
-                ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+                ax     = axes[row, col]
+                coords = _project(snap[key]["logits"])
+                self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt)
                 if col == 0:
-                    ax.set_ylabel(row_labels[row], fontsize=8)
+                    ax.set_ylabel("Federated" if row == 0 else "Local-only", fontsize=8)
                 if row == 0:
                     ax.set_title(f"Silo {i}", fontsize=8)
 
-        _add_legend(fig, unique_icd3, icd_color)
-        var = pca.explained_variance_ratio_
-        fig.suptitle(f"Round {last_round} — federated vs local-only per silo\nPC1={var[0]:.1%}  PC2={var[1]:.1%}",
-                     fontsize=10)
+        _add_legend(fig, unique_icd3, icd_color, ncol=4)
+        fig.suptitle(f"Round {last_round} — federated vs local-only (logit-space UMAP)", fontsize=10)
         path = self.output_dir / "fl_gain_final.png"
         fig.savefig(path, dpi=130)
         plt.close(fig)
@@ -384,8 +446,8 @@ class EmbeddingTracker:
 
 # ── Legend helper ─────────────────────────────────────────────────────────────
 
-def _add_legend(fig, unique_icd3: list, icd_color: dict) -> None:
+def _add_legend(fig, unique_groups: list, color_map: dict, ncol: int = 7) -> None:
     import matplotlib.patches as mpatches
-    patches = [mpatches.Patch(color=icd_color[icd], label=icd) for icd in unique_icd3]
-    fig.legend(handles=patches, loc="lower center", ncol=min(7, len(unique_icd3)),
+    patches = [mpatches.Patch(color=color_map[g], label=g) for g in unique_groups]
+    fig.legend(handles=patches, loc="lower center", ncol=min(ncol, len(unique_groups)),
                fontsize=7, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
