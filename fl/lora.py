@@ -22,8 +22,9 @@ class LoRAConfig:
     target_modules: list[str] = field(
         default_factory=lambda: ["q_lin", "v_lin"]
     )
-    # 6 canonical ICD codes × 3 management tiers (home rest / treat / hospitalise)
-    num_labels: int = 18
+    # 8 canonical ICD codes × 3 management tiers (home rest / treat / hospitalise)
+    # = 3 infectious + 5 non-infectious, overridden dynamically by WorldFLClient
+    num_labels: int = 24
 
     @property
     def scaling(self) -> float:

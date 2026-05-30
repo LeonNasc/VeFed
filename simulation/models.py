@@ -269,8 +269,9 @@ class DiagnosticEvent:
     case_table:     Optional[object] = None   # CaseTable instance
     diagnosis:      Optional[str] = None       # LLM's diagnosis text
     ground_truth:   Optional[str] = None       # Actual diagnosis for accuracy
-    is_background:  bool          = False      # True for worried-well / routine-check visitors
+    is_background:  bool          = False      # True for non-infectious background visitors
     num_turns:      int           = 0          # LLM doctor turns used (0 = no LLM)
+    complaint_context: Optional[str] = None   # prompt hint for patient LLM (non-infectious only)
 
 
 # ─── Agent ────────────────────────────────────────────────────────────────────
@@ -309,12 +310,14 @@ class Agent:
         """Accumulate tick exposure; eq. 2."""
         self.cumulative_exposure += exposure
 
-    def apply_daily_infection(self, progression=None) -> bool:
+    def apply_daily_infection(self, progression=None,
+                              disease_weights: list | None = None) -> bool:
         """
         At end of day, stochastic S→I transition: eq. 3.
         Samples a DiseaseTrajectory from progression strategy.
-        progression may be a single DiseaseProgressionStrategy or a list (multi-disease);
-        in the list case one disease is chosen uniformly at random.
+        progression may be a single DiseaseProgressionStrategy or a list (multi-disease).
+        disease_weights: per-silo Dirichlet weights over the progression list;
+          when provided, disease selection is weighted rather than uniform.
         Returns True if newly infected.
         """
         if self.health_state.status != HealthStatus.SUSCEPTIBLE:
@@ -322,7 +325,7 @@ class Agent:
         p_infect = 1.0 - math.exp(-self.cumulative_exposure)
         if self._rng.random() < p_infect:
             if isinstance(progression, list):
-                chosen = self._rng.choice(progression)
+                chosen = self._rng.choices(progression, weights=disease_weights)[0]
             elif progression is not None:
                 chosen = progression
             else:

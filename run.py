@@ -103,85 +103,73 @@ def _make_presets() -> dict[str, RunConfig]:
             disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 10,
-            local_epochs        = 3,
+            local_epochs        = 10,
         ),
 
         # ── multi-disease ─────────────────────────────────────────────────────
-        # Four diseases in circulation simultaneously (IID — all silos see the same mix).
-        # Tests whether the model can distinguish disease identity under mixed spread.
+        # Three archetypes in circulation (Dirichlet α=0.3 assigns weights per silo).
+        # Tests non-IID disease identity under mixed spread without explicit WorldConfig.
         "multi-disease": RunConfig(
             mode                = "fl",
             num_agents          = 100,
             num_silos           = 5,
-            progressions        = ["Standard Flu", "Mild Corona", "Slow Burn", "Aggressive Flu"],
-            disease_strategy    = "Aggressive Flu",
+            progressions        = ["Standard Flu", "Mild Corona", "Slow Burn"],
+            disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 10,
-            local_epochs        = 3,
+            local_epochs        = 10,
         ),
 
         # ── non-iid ───────────────────────────────────────────────────────────
-        # Five silos with different disease profiles, population sizes, and spread rates.
-        # Silo 0: urban hospital — aggressive flu, large population, high transmission.
-        # Silo 1: general ward — flu + corona, moderate size.
-        # Silo 2: rural clinic — slow-burn sepsis only, small population, low beta.
-        # Silo 3: infectious diseases unit — all-disease mix, medium size.
-        # Silo 4: outbreak silo — deadly pneumonia, aggressive spread.
+        # Three silos with explicitly different disease profiles and population sizes.
+        # Silo 0: urban hospital — flu + corona, large population, high transmission.
+        # Silo 1: general ward   — flu + sepsis, moderate size.
+        # Silo 2: rural clinic   — slow-burn sepsis only, small population, low beta.
         "non-iid": RunConfig(
             mode                = "fl",
-            num_agents          = 80,   # fallback; overridden per silo by world_configs
-            num_silos           = 5,
+            num_agents          = 80,
+            num_silos           = 3,
             disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 8,
-            local_epochs        = 3,
+            local_epochs        = 10,
             world_configs       = [
-                WorldConfig(num_agents=150, progressions=["Aggressive Flu"],
-                            disease_strategy="Aggressive Flu", beta_scale=1.4),
-                WorldConfig(num_agents=80,  progressions=["Standard Flu", "Mild Corona"],
-                            disease_strategy="Standard Flu",   beta_scale=1.0),
+                WorldConfig(num_agents=150, progressions=["Standard Flu", "Mild Corona"],
+                            disease_strategy="Standard Flu", beta_scale=1.3),
+                WorldConfig(num_agents=80,  progressions=["Standard Flu", "Slow Burn"],
+                            disease_strategy="Standard Flu", beta_scale=1.0),
                 WorldConfig(num_agents=40,  progressions=["Slow Burn"],
-                            disease_strategy="Standard Flu",   beta_scale=0.6),
-                WorldConfig(num_agents=100, progressions=["Standard Flu", "Mild Corona",
-                                                          "Slow Burn", "Aggressive Flu"],
-                            disease_strategy="Aggressive Flu", beta_scale=1.1),
-                WorldConfig(num_agents=60,  progressions=["Deadly"],
-                            disease_strategy="Aggressive Flu", beta_scale=1.3),
+                            disease_strategy="Standard Flu", beta_scale=0.6),
             ],
         ),
 
         # ── hard-triage ───────────────────────────────────────────────────────
-        # Slow Burn (sepsis-like plateau, muted symptoms) + Deadly (near-zero decay,
-        # life-threatening). Both are designed to fool symptom-based triage.
-        # Tests whether FL knowledge sharing helps with rare dangerous presentations.
+        # Slow Burn (sepsis-like plateau, muted symptoms) + Mild Corona (silent
+        # hypoxia). Both are designed to fool symptom-based triage.
         "hard-triage": RunConfig(
             mode                = "fl",
             num_agents          = 80,
             num_silos           = 3,
-            progressions        = ["Slow Burn", "Deadly"],
+            progressions        = ["Slow Burn", "Mild Corona"],
             disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 8,
-            local_epochs        = 3,
+            local_epochs        = 10,
         ),
 
         # ── long-burn ─────────────────────────────────────────────────────────
         # Designed for embedding evolution studies: large populations + slower
         # spread keep all silos alive for 30+ rounds at 2 sim-days/round.
-        # - 300 agents/silo: more susceptibles → epidemic takes much longer to exhaust
-        # - beta_scale=0.6: slower spread without changing R0 shape
-        # - initial_seeds=8: ~2.7% seeding prevents stochastic early die-off
-        # - sim_days=2: dense round sequence → better embedding evolution tracking
         "long-burn": RunConfig(
             mode                = "fl",
             num_agents          = 300,
             num_silos           = 3,
-            progressions        = ["Slow Burn", "Deadly"],
+            progressions        = ["Slow Burn", "Mild Corona"],
             disease_strategy    = "Standard Flu",
             end_condition       = "horizon",
-            end_condition_param = 80,   # 80 sim-days → ~40 rounds at sim_days=2
+            end_condition_param = 80,
             min_events_to_train = 5,
-            local_epochs        = 3,
+            local_epochs        = 10,
             sim_days            = 2,
             beta_scale          = 0.7,
             initial_seeds       = 12,
@@ -192,10 +180,10 @@ def _make_presets() -> dict[str, RunConfig]:
 PRESET_DESCRIPTIONS = {
     "smoke":        "2 silos · 15 agents · Standard Flu · fast smoke test (offline W&B, no Ollama)",
     "standard":     "3 silos · 60 agents · Flu + Corona · typical research run",
-    "multi-disease":"5 silos · 100 agents · 4 diseases (IID) · tests disease identity",
-    "non-iid":      "5 silos · asymmetric disease mix, population, and spread per silo",
-    "hard-triage":  "3 silos · Slow Burn + Deadly · maximum triage difficulty",
-    "long-burn":    "3 silos · 300 agents · Slow Burn + Deadly · sim_days=2 · designed for embedding studies",
+    "multi-disease":"5 silos · 100 agents · 3 archetypes · Dirichlet α=0.3 non-IID",
+    "non-iid":      "3 silos · explicit disease profiles (Flu+Corona / Flu+Sepsis / Sepsis)",
+    "hard-triage":  "3 silos · Slow Burn + Mild Corona · maximum triage difficulty",
+    "long-burn":    "3 silos · 300 agents · Slow Burn + Corona · sim_days=2 · embedding studies",
 }
 
 

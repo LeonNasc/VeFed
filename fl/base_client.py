@@ -23,17 +23,23 @@ from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 
 MANAGEMENT_TIERS = ("home rest", "treat", "hospitalise")
 
-# Fixed label vocabulary spanning all progression strategies.
-# Every silo uses this same set so FedAvg weight shapes always match and
-# icd_category_acc is non-trivial even in single-disease runs: the model must
-# learn to map symptom text to the correct disease, not just to management tier.
+# Canonical label vocabulary: 3 infectious archetypes + 5 non-infectious complaint
+# types = 8 ICD codes × 3 management tiers = 24 classes.
+# All silos share this vocabulary so FedAvg weight shapes always match.
+# Non-infectious complaints only generate "home rest" or "treat" ground-truth,
+# so "hospitalise" rows for those codes have zero support — the model learns
+# not to predict them without any special handling.
 CANONICAL_ICD_CODES: list[str] = [
-    "J09.X1",   # Aggressive Flu  — novel influenza A with pneumonia
-    "J10.89",   # Persistent Flu  — identified influenza, other manifestations
+    # ── Infectious (circulate via SIR) ──────────────────────────────────────
     "J11.1",    # Standard Flu    — unidentified influenza, respiratory
-    "J18.9",    # Deadly          — pneumonia, unspecified
     "U07.2",    # Mild Corona     — COVID-19, virus not identified
     "A41.9",    # Slow Burn       — sepsis, unspecified organism
+    # ── Non-infectious (background clinic visits, shared across silos) ──────
+    "M54.5",    # Low back pain
+    "R51",      # Headache
+    "F41.1",    # Generalised anxiety disorder
+    "Z87.39",   # Hypertension follow-up
+    "R53.83",   # Fatigue, non-specific
 ]
 
 
@@ -66,8 +72,8 @@ def icd_match_score(pred_label: str, true_label: str) -> float:
       no match                                         → 0.0
 
     The 3-char threshold mirrors clinical coding practice: codes in the same
-    category represent closely related conditions (e.g. J09.X1, J09.X2 are
-    both novel influenza A with different presentations).
+    category represent closely related conditions (e.g. M54.4 and M54.5 are
+    both lumbago variants).
     """
     pred_icd = pred_label.split(" / ")[0]
     true_icd = true_label.split(" / ")[0]
@@ -102,10 +108,11 @@ class WorldFLClient:
         lora_config: Optional[LoRAConfig] = None,
         sim_days: int = 7,
         min_events_to_train: int = 10,
-        local_epochs: int = 3,
+        local_epochs: int = 10,
         batch_size: int = 8,
         lr: float = 1e-4,
         device: Optional[str] = None,
+        replay_buffer_size: int = 2048,
     ):
         import torch
         self.world               = world
@@ -114,6 +121,7 @@ class WorldFLClient:
         self.local_epochs        = local_epochs
         self.batch_size          = batch_size
         self.lr                  = lr
+        self.replay_buffer_size  = replay_buffer_size
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         self._label2id, self._id2label = build_label_map(CANONICAL_ICD_CODES)
@@ -128,6 +136,12 @@ class WorldFLClient:
         self._model       = None  # lazy-built on first use
         self._local_model = None  # shadow local-only model (never receives global weights)
         self.last_round_events: list = []   # events from the most recent round
+
+        # Per-silo replay buffers: federated model and local shadow model train on
+        # accumulated history, not just the current round's events. Capped at
+        # replay_buffer_size (drop oldest) to avoid unbounded memory growth.
+        self._replay_buffer:       list = []
+        self._local_replay_buffer: list = []
 
         # Frozen-silo state — populated when world.is_done fires
         self._frozen_weights:          Optional[list] = None
@@ -232,9 +246,30 @@ class WorldFLClient:
 
         return len(texts), epoch_losses
 
+    def _extend_buffer(self, buf: list, new_events: list) -> None:
+        """Append new_events to buf; drop oldest entries if over capacity."""
+        buf.extend(new_events)
+        excess = len(buf) - self.replay_buffer_size
+        if excess > 0:
+            del buf[:excess]
+
     def train_on_events(self, events: list) -> tuple[int, list[float]]:
-        """Fine-tune the federated LoRA model. Returns (num_examples, epoch_losses)."""
-        return self._train_model(self.model, events)
+        """
+        Fine-tune the federated LoRA model.
+
+        New events are added to the per-silo replay buffer; training uses the
+        full accumulated buffer rather than just the current round's events.
+        This prevents gradient starvation in late-epidemic rounds (few new
+        events) and gives the model access to the peak-epidemic signal from
+        earlier rounds.
+        """
+        self._extend_buffer(self._replay_buffer, events)
+        return self._train_model(self.model, self._replay_buffer)
+
+    def train_local_on_events(self, events: list) -> None:
+        """Fine-tune the local shadow model using its own replay buffer."""
+        self._extend_buffer(self._local_replay_buffer, events)
+        self._train_model(self.local_model, self._local_replay_buffer)
 
     # ── Weight I/O ─────────────────────────────────────────────────────────────
 
@@ -510,7 +545,7 @@ class WorldFLClient:
 
         if num_events >= self.min_events_to_train:
             n, epoch_losses = self.train_on_events(events)
-            self._train_model(self.local_model, events)
+            self.train_local_on_events(events)
             trained = 1
         else:
             n, epoch_losses = 0, []

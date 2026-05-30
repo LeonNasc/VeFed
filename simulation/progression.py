@@ -437,11 +437,11 @@ def _make_mimic_mock() -> MimicProgression:
 PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
     s.name: s for s in [
         StandardFluProgression(),
-        AggressiveFluProgression(),
-        PersistentFluProgression(),
         MildCoronaProgression(),
         SlowBurnProgression(),
-        DeadlyProgression(),
         _make_mimic_mock(),
     ]
 }
+# AggressiveFluProgression, PersistentFluProgression, DeadlyProgression are
+# retained as classes but excluded from the default registry to keep the
+# infectious label space at 3 archetypes (J11.1, U07.2, A41.9).

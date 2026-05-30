@@ -202,12 +202,15 @@ class WorldEngine:
                  background_visit_rate: float = 0.025,
                  beta_scale: float = 1.0,
                  reveal_incubating_icd: bool = True,
-                 initial_seeds: int = 3):
+                 initial_seeds: int = 3,
+                 disease_weights: list[float] | None = None):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
         self._beta_scale: float = beta_scale
         self.reveal_incubating_icd: bool = reveal_incubating_icd
+        # Dirichlet-sampled per-silo disease weights; None → uniform selection
+        self._disease_weights: list[float] | None = disease_weights
 
         # Build the progression list (multi-disease when progression_strategies provided)
         if progression_strategies:
@@ -257,7 +260,7 @@ class WorldEngine:
         from simulation.case_table import CaseTable
         seed_agents = self._rng.sample(self.agents, min(initial_seeds, len(self.agents)))
         for seed_agent in seed_agents:
-            _prog = self._rng.choice(self.progressions)
+            _prog = self._rng.choices(self.progressions, weights=self._disease_weights)[0]
             _traj = _prog.sample_trajectory(self._rng)
             seed_agent.health_state.infect(_traj)
             if hasattr(_traj, "_record"):
@@ -466,7 +469,7 @@ class WorldEngine:
         # Stochastic S→I transitions for accumulated daily exposure (eq. 3)
         newly_infected = []
         for agent in self.agents:
-            if agent.apply_daily_infection(self.progressions):
+            if agent.apply_daily_infection(self.progressions, self._disease_weights):
                 newly_infected.append(agent.name)
             agent.reset_daily_exposure()
 
@@ -518,17 +521,17 @@ class WorldEngine:
             if ag:
                 c.conversation.append({
                     'role':  'patient',
-                    'text':  self._generate_opening(ag),
+                    'text':  self._generate_opening(ag, event=c),
                 })
             self.clinic_queue.enqueue(c)
 
-        # Collect background healthy / worried-well visitors
+        # Collect non-infectious background visitors
         for c in self._collect_background_cases():
             ag = self.agents_by_id.get(c.agent_id)
             if ag:
                 c.conversation.append({
                     'role':  'patient',
-                    'text':  self._generate_opening(ag),
+                    'text':  self._generate_opening(ag, event=c),
                 })
             self.clinic_queue.enqueue(c)
 
@@ -553,10 +556,12 @@ class WorldEngine:
 
     def _collect_background_cases(self) -> list[DiagnosticEvent]:
         """
-        Background healthy visitors: susceptible or recovered agents who show up
-        at the clinic without a real disease (worried-well, routine checks).
+        Non-infectious clinic visitors: susceptible or recovered agents presenting
+        with a structured non-infectious complaint (back pain, headache, anxiety,
+        hypertension follow-up, or fatigue) rather than an active infection.
         Rate is configurable via background_visit_rate (default 2.5 %/agent/day).
         """
+        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
         cases = []
         for agent in self.agents:
             if agent.status not in (HealthStatus.SUSCEPTIBLE, HealthStatus.RECOVERED):
@@ -564,35 +569,45 @@ class WorldEngine:
             if agent.hospitalised or agent._care_cooldown > 0:
                 continue
             if self._rng.random() < self.background_visit_rate:
+                complaint = self._rng.choice(NON_INFECTIOUS_COMPLAINTS)
                 ev = DiagnosticEvent(
-                    agent_id      = agent.id,
-                    severity      = 0.0,
-                    symptoms      = self._rng.uniform(0.0, 0.10),
-                    days_infected = 0,
-                    personality   = agent.personality,
-                    case_table    = None,
-                    ground_truth  = "Z00.0 / home rest",
-                    is_background = True,
+                    agent_id          = agent.id,
+                    severity          = 0.0,
+                    symptoms          = self._rng.uniform(0.0, 0.10),
+                    days_infected     = 0,
+                    personality       = agent.personality,
+                    case_table        = None,
+                    ground_truth      = f"{complaint.icd_code} / {complaint.management}",
+                    is_background     = True,
+                    complaint_context = complaint.prompt_context,
                 )
                 cases.append(ev)
         return cases
 
-    def _generate_opening(self, agent) -> str:
+    def _generate_opening(self, agent, event: DiagnosticEvent | None = None) -> str:
         """
         Opening patient complaint for the clinic queue.
         Uses PatientLLMClient if wired; falls back to SymptomNarrator templates.
-        Healthy (susceptible/recovered) agents use background worried-well phrases.
+
+        Non-infectious visitors (event.complaint_context set) use the complaint
+        context to prompt the patient LLM for a naturalistically typed opening.
+        Infectious visitors use severity + days_infected as before.
         """
         from simulation.symptom_language import background_opening
-        if agent.health_state.status in (HealthStatus.SUSCEPTIBLE, HealthStatus.RECOVERED):
-            patient_llm = getattr(self, "_patient_llm", None)
+        patient_llm = getattr(self, "_patient_llm", None)
+
+        # Non-infectious background visit — use complaint-specific LLM prompt
+        if event is not None and event.complaint_context:
             if patient_llm is not None:
                 try:
-                    return patient_llm.opening_statement(0.0, 0, agent.personality)
+                    return patient_llm.complaint_opening(
+                        event.complaint_context, agent.personality
+                    )
                 except Exception:
                     pass
             return background_opening(agent.personality, self._rng)
-        patient_llm = getattr(self, "_patient_llm", None)
+
+        # Infectious visit
         if patient_llm is not None:
             try:
                 return patient_llm.opening_statement(

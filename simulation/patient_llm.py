@@ -81,6 +81,17 @@ class PatientLLMClient:
         )
         return self._call(_SYSTEM_OPENING.format(tone=tone), user_msg)
 
+    def complaint_opening(self, prompt_context: str, personality) -> str:
+        """
+        Generate an opening statement for a non-infectious complaint visit.
+        prompt_context describes the specific complaint (e.g. "You have lower back
+        pain…"); the model generates a natural first-person clinic opening.
+        """
+        tone     = _PERSONALITY_TONE.get(personality.value, _PERSONALITY_TONE["neutral"])
+        system   = _SYSTEM_OPENING.format(tone=tone)
+        user_msg = f"{prompt_context}\nTell the doctor why you came today."
+        return self._call(system, user_msg)
+
     def followup_answer(self, question: str, severity: float, personality,
                         case_table=None, day: int = 0) -> str:
         """

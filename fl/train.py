@@ -88,7 +88,7 @@ class FLTrainConfig:
     num_agents:          int         = 30      # agents per silo (overridden by world_configs)
     sim_days:            int         = 7       # simulated days per FL round
     min_events_to_train: int         = 10      # skip LoRA update if fewer events this round
-    local_epochs:        int         = 3
+    local_epochs:        int         = 10
     batch_size:          int         = 8
     lr:                  float       = 1e-4
     lora_rank:           int         = 8
@@ -105,6 +105,11 @@ class FLTrainConfig:
     # End condition (applied per silo; default: run until epidemic extinct)
     end_condition:       str         = "extinction"
     end_condition_param: Optional[int] = None
+    # Non-IID disease distribution — Dirichlet(α) per silo over the disease list
+    # α → 0: each silo dominated by one disease; α → ∞: IID mix
+    dirichlet_alpha:     float       = 0.3
+    # Replay buffer: events accumulated across rounds for local LoRA training
+    replay_buffer_size:  int         = 2048
     # W&B
     wandb_project:       str         = "fedworld"
     wandb_run_name:      Optional[str] = None
@@ -177,6 +182,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
     )
 
     # ── World builder — respects per-silo WorldConfig when provided ───────────
+    rng_dirichlet = np.random.default_rng(cfg.seed)
+
     def _make_world(silo_idx: int) -> WorldEngine:
         wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
 
@@ -207,6 +214,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             rev_incub_icd = True
             n_seeds       = cfg.initial_seeds
 
+        # Dirichlet per-silo disease weights (reproducible: seed + silo index)
+        if len(progs) > 1 and cfg.dirichlet_alpha > 0:
+            d_weights = rng_dirichlet.dirichlet(
+                [cfg.dirichlet_alpha] * len(progs)
+            ).tolist()
+        else:
+            d_weights = None  # single disease or α=0 → uniform
+
         return WorldEngine(
             num_agents             = n_agents,
             seed                   = cfg.seed + silo_idx + s_offset,
@@ -217,6 +232,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             beta_scale             = bscale,
             reveal_incubating_icd  = rev_incub_icd,
             initial_seeds          = n_seeds,
+            disease_weights        = d_weights,
         )
 
     # ── Create silos ──────────────────────────────────────────────────────────
@@ -233,6 +249,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 local_epochs         = cfg.local_epochs,
                 batch_size           = cfg.batch_size,
                 lr                   = cfg.lr,
+                replay_buffer_size   = cfg.replay_buffer_size,
             )
         )
 
@@ -480,7 +497,7 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--min-events",  type=int,   default=10,
                    dest="min_events_to_train",
                    help="Skip LoRA training if fewer events collected this round")
-    p.add_argument("--epochs",      type=int,   default=3)
+    p.add_argument("--epochs",      type=int,   default=10)
     p.add_argument("--batch-size",  type=int,   default=8)
     p.add_argument("--lr",          type=float, default=1e-4)
     p.add_argument("--lora-rank",   type=int,   default=8)
