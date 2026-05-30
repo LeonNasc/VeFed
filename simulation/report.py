@@ -45,10 +45,18 @@ class RunReport:
     """
 
     def __init__(self, cfg, run_id: str):
-        self.cfg    = cfg
-        self.run_id = run_id
+        self.cfg     = cfg
+        self.run_id  = run_id
         self._rounds: list[dict] = []
         self._convs:  list[dict] = []
+
+        from viz.metrics_plot import MetricsPlotter
+        progs = getattr(cfg, "progressions", [])
+        prog_str = " + ".join(progs) if progs else getattr(cfg, "disease_strategy", "")
+        self.plotter = MetricsPlotter(
+            title   = f"{getattr(cfg,'num_silos','?')} silos · {prog_str}",
+            n_silos = getattr(cfg, "num_silos", 3),
+        )
 
     # ── Data ingestion ────────────────────────────────────────────────────────
 
@@ -76,13 +84,27 @@ class RunReport:
         self._rounds.append({
             "round":    round_num,
             "silos":    silos,
-            "agg_loss":    log.get("aggregated/loss",           float("nan")),
-            "agg_triage":  log.get("aggregated/triage_acc",    float("nan")),
-            "agg_diag":    log.get("aggregated/diag_acc",      float("nan")),
-            "agg_f1":      log.get("aggregated/triage_macro_f1", float("nan")),
-            "agg_danger":  log.get("aggregated/danger_rate",   float("nan")),
-            "n_trained":   int(log.get("aggregated/num_trained", 0)),
+            "agg_loss":    log.get("aggregated/loss",              float("nan")),
+            "agg_triage":  log.get("aggregated/triage_acc",       float("nan")),
+            "agg_diag":    log.get("aggregated/diag_acc",         float("nan")),
+            "agg_f1":      log.get("aggregated/triage_macro_f1",  float("nan")),
+            "agg_danger":  log.get("aggregated/danger_rate",      float("nan")),
+            "n_trained":   int(log.get("aggregated/num_trained",  0)),
         })
+
+        # Feed plotter — handles both federated and centralized keys gracefully
+        if "aggregated/triage_acc" in log:
+            self.plotter.add_federated_round(round_num, log)
+        if "centralized/triage_acc" in log:
+            self.plotter.add_centralized_round(round_num, log)
+
+        # SIR per silo (present in federated rounds)
+        silo_i = [int(log.get(f"silo_{i}/sir_i", 0))
+                  for i in range(self.cfg.num_silos)]
+        if any(v > 0 for v in silo_i):
+            self.plotter._sir_rounds.append(round_num)
+            for i, v in enumerate(silo_i):
+                self.plotter._sir_i.setdefault(i, []).append(v)
 
         # Harvest up to 2 rich conversations per silo per round
         for i, events in enumerate(silo_events):
@@ -106,10 +128,18 @@ class RunReport:
     def write(self, out_path: str | Path) -> Path:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(self._render(), encoding="utf-8")
+
+        # Save standalone PNG alongside the HTML
+        png_path = out_path.with_suffix(".png")
+        try:
+            self.plotter.save(png_path)
+        except Exception:
+            png_path = None   # matplotlib unavailable — skip silently
+
+        out_path.write_text(self._render(png_path), encoding="utf-8")
         return out_path
 
-    def _render(self) -> str:
+    def _render(self, png_path=None) -> str:
         cfg    = self.cfg
         now    = datetime.now().strftime("%Y-%m-%d %H:%M")
         n_s    = cfg.num_silos
@@ -181,6 +211,12 @@ class RunReport:
         if not convs_html:
             convs_html = "<p class='dim'>No conversations collected — min_events_to_train threshold not met.</p>"
 
+        # ── Metric curves figure ─────────────────────────────────────────────
+        try:
+            metrics_img = self.plotter.as_html_img()
+        except Exception:
+            metrics_img = "<p class='dim'>Metric curves unavailable (matplotlib error).</p>"
+
         # ── Summary stats ─────────────────────────────────────────────────────
         total_ev  = sum(ev_vals)
         n_correct = sum(1 for c in self._convs if c["match"])
@@ -248,6 +284,9 @@ tr:hover td{{background:#161b22}}
   <div class="cfg-item"><div class="cfg-label">Epochs</div><div class="cfg-val">{getattr(cfg,'local_epochs','—')}</div></div>
   <div class="cfg-item"><div class="cfg-label">Seed</div><div class="cfg-val">{getattr(cfg,'seed','—')}</div></div>
 </div>
+
+<h2>Metric Curves</h2>
+{metrics_img}
 
 <h2>Epidemic Bell Curve</h2>
 {sparks}
