@@ -124,12 +124,12 @@ class OllamaDiagnosticClient:
                     "hospitalize":   DiagnosticAction.HOSPITALISE,
                 }
                 event.action       = action_map.get(
-                    parsed.get("action", "").lower(), DiagnosticAction.RECOVER
+                    (parsed.get("action") or "").lower(), DiagnosticAction.RECOVER
                 )
-                event.oracle_label = parsed.get("label", "unknown")
-                event.diagnosis    = parsed.get("diagnosis", "")[:100]
-                event.notes        = parsed.get("notes", "")[:160]
-                action_str = parsed.get("action", "unknown").replace("_", " ")
+                event.oracle_label = parsed.get("label") or "unknown"
+                event.diagnosis    = (parsed.get("diagnosis") or "")[:100]
+                event.notes        = (parsed.get("notes") or "")[:160]
+                action_str = (parsed.get("action") or "unknown").replace("_", " ")
                 event.conversation.append({
                     "role": "doctor",
                     "text": (

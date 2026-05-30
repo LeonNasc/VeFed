@@ -49,34 +49,64 @@ from simulation.progression import PROGRESSION_STRATEGIES, DiseaseProgressionStr
 from simulation.end_conditions import EndCondition, from_config as end_condition_from_config
 
 
+# ── Per-silo world configuration ─────────────────────────────────────────────
+
+@dataclass
+class WorldConfig:
+    """
+    Per-silo world configuration for non-IID federated learning experiments.
+
+    When a list of WorldConfig objects is passed to FLTrainConfig.world_configs,
+    each silo gets its own disease mix, population size, spread rate, and end
+    condition — enabling asymmetric (non-IID) federation.
+
+    Example — urban vs. rural silos:
+        WorldConfig(num_agents=150, progressions=["Aggressive Flu", "Mild Corona"],
+                    disease_strategy="Aggressive Flu", beta_scale=1.3)
+        WorldConfig(num_agents=60,  progressions=["Standard Flu"],
+                    disease_strategy="Standard Flu",   beta_scale=0.7)
+    """
+    num_agents:            int         = 30
+    progressions:          list[str]   = field(default_factory=lambda: ["Standard Flu"])
+    disease_strategy:      str         = "Standard Flu"
+    beta_scale:            float       = 1.0
+    background_visit_rate: float       = 0.025
+    end_condition:         str         = "extinction"
+    end_condition_param:   Optional[int] = None
+    seed_offset:           int         = 0
+
+
 # ── Config dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
 class FLTrainConfig:
     """All hyperparameters for one federated training run."""
-    num_silos:          int   = 3
-    num_rounds:         int   = 10
-    num_agents:         int   = 30       # agents per silo
-    sim_days:           int   = 7        # simulated days per FL round
-    min_events_to_train: int  = 10       # skip LoRA update if fewer events this round
-    local_epochs:       int   = 3
-    batch_size:         int   = 8
-    lr:                 float = 1e-4
-    lora_rank:          int   = 8
-    lora_alpha:         float = 16.0
-    lora_dropout:       float = 0.05
-    progression:        str   = "Standard Flu"   # key in PROGRESSION_STRATEGIES
-    seed:               int   = 42
-    # End condition
-    end_condition:      str   = "horizon"   # horizon | extinction | no_susceptibles | budget
-    end_condition_param: Optional[int] = None  # max_days | consecutive_days | target_events
+    num_silos:           int         = 3
+    max_rounds:          int         = 100     # safety cap; run ends earlier when all silos done
+    num_agents:          int         = 30      # agents per silo (overridden by world_configs)
+    sim_days:            int         = 7       # simulated days per FL round
+    min_events_to_train: int         = 10      # skip LoRA update if fewer events this round
+    local_epochs:        int         = 3
+    batch_size:          int         = 8
+    lr:                  float       = 1e-4
+    lora_rank:           int         = 8
+    lora_alpha:          float       = 16.0
+    lora_dropout:        float       = 0.05
+    progressions:        list[str]   = field(default_factory=lambda: ["Standard Flu"])
+    disease_strategy:    str         = "Standard Flu"
+    seed:                int         = 42
+    # Per-silo non-IID config (overrides global params when provided)
+    world_configs:       Optional[list[WorldConfig]] = None
+    # End condition (applied per silo; default: run until epidemic extinct)
+    end_condition:       str         = "extinction"
+    end_condition_param: Optional[int] = None
     # W&B
-    wandb_project:      str   = "fedworld"
-    wandb_run_name:     Optional[str] = None
-    wandb_entity:       Optional[str] = None
-    wandb_offline:      bool  = False    # True → no network, logs saved locally
-    use_ollama:         bool  = True     # Wire Ollama doctor; falls back to stub if unreachable
-    patient_model:      str   = "tinyllama"  # Ollama model for patient statement generation
+    wandb_project:       str         = "fedworld"
+    wandb_run_name:      Optional[str] = None
+    wandb_entity:        Optional[str] = None
+    wandb_offline:       bool        = False
+    use_ollama:          bool        = True
+    patient_model:       str         = "tinyllama"
 
     def lora_config(self) -> LoRAConfig:
         return LoRAConfig(
@@ -124,45 +154,65 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                                 if k in FLTrainConfig.__dataclass_fields__})
 
     import wandb
-
-    # ── Progression strategy ──────────────────────────────────────────────────
-    if cfg.progression not in PROGRESSION_STRATEGIES:
-        raise ValueError(
-            f"Unknown progression strategy {cfg.progression!r}. "
-            f"Available: {list(PROGRESSION_STRATEGIES)}"
-        )
-    progression = PROGRESSION_STRATEGIES[cfg.progression]
+    from simulation.strategies import STRATEGIES
 
     # ── W&B initialisation ────────────────────────────────────────────────────
     if cfg.wandb_offline:
         import os
         os.environ["WANDB_MODE"] = "offline"
 
+    wandb_cfg = {k: v for k, v in asdict(cfg).items()
+                 if not k.startswith("wandb_") and k != "world_configs"}
     run = wandb.init(
         project = cfg.wandb_project,
         name    = cfg.wandb_run_name,
         entity  = cfg.wandb_entity,
-        config  = {
-            **{k: v for k, v in asdict(cfg).items()
-               if not k.startswith("wandb_")},
-        },
+        config  = wandb_cfg,
         reinit  = "finish_previous",
     )
 
-    # ── End condition — one instance per silo (each has independent state) ────
-    def _make_end_condition() -> EndCondition:
-        return end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+    # ── World builder — respects per-silo WorldConfig when provided ───────────
+    def _make_world(silo_idx: int) -> WorldEngine:
+        wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
+
+        if wc is not None:
+            progs     = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy  = STRATEGIES.get(wc.disease_strategy)
+            end_cond  = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents  = wc.num_agents
+            bg_rate   = wc.background_visit_rate
+            bscale    = wc.beta_scale
+            s_offset  = wc.seed_offset
+        else:
+            unknown = [p for p in cfg.progressions if p not in PROGRESSION_STRATEGIES]
+            if unknown:
+                raise ValueError(
+                    f"Unknown progression(s): {unknown}. "
+                    f"Available: {list(PROGRESSION_STRATEGIES)}"
+                )
+            progs    = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy = STRATEGIES.get(cfg.disease_strategy)
+            end_cond = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents = cfg.num_agents
+            bg_rate  = 0.025
+            bscale   = 1.0
+            s_offset = 0
+
+        return WorldEngine(
+            num_agents             = n_agents,
+            seed                   = cfg.seed + silo_idx + s_offset,
+            progression_strategies = progs,
+            disease_strategy       = strategy,
+            end_condition          = end_cond,
+            background_visit_rate  = bg_rate,
+            beta_scale             = bscale,
+        )
 
     # ── Create silos ──────────────────────────────────────────────────────────
     lora_cfg = cfg.lora_config()
     silos: list[WorldFLClient] = []
     for i in range(cfg.num_silos):
-        world = WorldEngine(
-            num_agents           = cfg.num_agents,
-            seed                 = cfg.seed + i,
-            progression_strategy = progression,
-            end_condition        = _make_end_condition(),
-        )
+        world = _make_world(i)
         silos.append(
             WorldFLClient(
                 world                = world,
@@ -207,14 +257,16 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         else:
             ollama_status = "unreachable — using stub oracle"
 
+    prog_summary = ", ".join(cfg.progressions) if not cfg.world_configs else "per-silo (WorldConfig)"
     print(
         f"\n{'─'*60}\n"
         f"  FedWorld FL Training\n"
-        f"  silos={cfg.num_silos}  rounds={cfg.num_rounds}  "
+        f"  silos={cfg.num_silos}  max_rounds={cfg.max_rounds}  "
         f"agents/silo={cfg.num_agents}\n"
         f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
         f"local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
-        f"  progression={cfg.progression}  seed={cfg.seed}\n"
+        f"  progressions={prog_summary}  seed={cfg.seed}\n"
+        f"  end_condition={cfg.end_condition}  (simulation-guided)\n"
         f"  LLM doctor:  {ollama_status}\n"
         f"  LLM patient: {patient_status}\n"
         f"{'─'*60}\n"
@@ -229,25 +281,32 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
     # ── Initialise global weights from silo 0 ─────────────────────────────────
     global_weights = silos[0].get_weights()
 
-    # ── FL rounds ─────────────────────────────────────────────────────────────
-    for round_num in range(1, cfg.num_rounds + 1):
+    # ── FL rounds — simulation-guided (run until all silos done or max_rounds) ─
+    for round_num in range(1, cfg.max_rounds + 1):
         t0 = time.time()
 
         round_weights:   list[list[np.ndarray]] = []
         round_nexamples: list[int]             = []
-        round_trained:   list[bool]            = []   # which silos actually trained
+        round_trained:   list[bool]            = []
         log: dict = {"round": round_num}
 
         agg_loss = agg_acc = agg_n = agg_trained = 0.0
 
         for i, silo in enumerate(silos):
-            silo.set_weights(global_weights)
-            m = silo.run_round()
+            if silo.world.is_done:
+                # Done silo: conditionally accept global model, then re-upload weights
+                silo.try_accept_global(global_weights)
+                m = silo.run_round()  # frozen path — no simulation
+                fedavg_n = silo._frozen_n  # fixed weight for FedAvg
+            else:
+                silo.set_weights(global_weights)
+                m = silo.run_round()
+                fedavg_n = m.get("num_examples", 0)
 
             round_weights.append(silo.get_weights())
-            n          = m.get("num_examples", 0)
-            did_train  = bool(m.get("trained", 0))
-            round_nexamples.append(n)
+            n         = m.get("num_examples", 0)
+            did_train = bool(m.get("trained", 0))
+            round_nexamples.append(fedavg_n)
             round_trained.append(did_train)
 
             # Per-silo metrics
@@ -266,21 +325,19 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 log[f"silo_{i}/stop_reason"] = silo.world.stop_reason or "done"
 
             if n > 0 and did_train:
-                agg_loss     += m.get("loss",         0.0) * n
-                agg_n        += n
-                agg_trained  += m.get("trained_on",   0)
+                agg_loss    += m.get("loss",       0.0) * n
+                agg_n       += n
+                agg_trained += m.get("trained_on", 0)
                 for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                             "combined_acc", "triage_macro_f1", "danger_rate"):
                     v = m.get(sub, float("nan"))
-                    if v == v:   # skip NaN
+                    if v == v:
                         agg_key = f"aggregated/{sub}"
                         log[agg_key] = log.get(agg_key, 0.0) + v * n
 
-        # ── FedAvg — only silos that trained contribute updated weights ────────
-        trained_weights  = [w for w, t in zip(round_weights, round_trained) if t]
-        trained_examples = [n for n, t in zip(round_nexamples, round_trained) if t]
-        if trained_weights:
-            global_weights = _fedavg(trained_weights, trained_examples)
+        # ── FedAvg — include all silos (done silos use _frozen_n weight) ──────
+        if any(n > 0 for n in round_nexamples):
+            global_weights = _fedavg(round_weights, round_nexamples)
         log["aggregated/silos_trained"] = sum(round_trained)
 
         # ── Federated few-shot update — refresh Ollama doctor's example bank ──
@@ -296,7 +353,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             log["aggregated/all_silos_done"] = 1
             run.log(log, step=round_num)
             elapsed = time.time() - t0
-            _print_round(round_num, cfg.num_rounds, log, elapsed)
+            _print_round(round_num, cfg.max_rounds, log, elapsed)
             _report.add_round(round_num, log, [s.last_round_events for s in silos])
             reasons = [silo.world.stop_reason or "done" for silo in silos]
             print(f"\n  All silos finished: {reasons[0]}")
@@ -317,7 +374,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         elapsed = time.time() - t0
-        _print_round(round_num, cfg.num_rounds, log, elapsed)
+        _print_round(round_num, cfg.max_rounds, log, elapsed)
 
     # ── Distribute final global model to all silos ────────────────────────────
     for silo in silos:
@@ -334,13 +391,13 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
 # ── Console progress helper ───────────────────────────────────────────────────
 
-def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
+def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> None:
     nan = float("nan")
-    agg_loss    = log.get("aggregated/loss",          nan)
-    triage      = log.get("aggregated/triage_acc",    nan)
-    diag        = log.get("aggregated/diag_acc",      nan)
+    agg_loss    = log.get("aggregated/loss",            nan)
+    triage      = log.get("aggregated/triage_acc",      nan)
+    diag        = log.get("aggregated/diag_acc",        nan)
     macro_f1    = log.get("aggregated/triage_macro_f1", nan)
-    danger      = log.get("aggregated/danger_rate",   nan)
+    danger      = log.get("aggregated/danger_rate",     nan)
     n_trained   = int(log.get("aggregated/num_trained", 0))
     silos_tr    = int(log.get("aggregated/silos_trained", 0))
 
@@ -350,16 +407,19 @@ def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
     silo_parts = []
     i = 0
     while f"silo_{i}/sir_i" in log:
-        sir_i  = int(log[f"silo_{i}/sir_i"])
-        n_ev   = int(log.get(f"silo_{i}/num_events", 0))
-        did    = "✓" if log.get(f"silo_{i}/trained", 0) else "✗"
-        tr_i   = _fmt(log.get(f"silo_{i}/triage_acc", nan))
-        dg_i   = _fmt(log.get(f"silo_{i}/diag_acc",   nan))
-        silo_parts.append(f"s{i}[I={sir_i} ev={n_ev} {did}tr={tr_i} dg={dg_i}]")
+        sir_i = int(log[f"silo_{i}/sir_i"])
+        n_ev  = int(log.get(f"silo_{i}/num_events", 0))
+        if log.get(f"silo_{i}/done"):
+            silo_parts.append(f"s{i}[I={sir_i} ~done]")
+        else:
+            did  = "✓" if log.get(f"silo_{i}/trained", 0) else "✗"
+            tr_i = _fmt(log.get(f"silo_{i}/triage_acc", nan))
+            dg_i = _fmt(log.get(f"silo_{i}/diag_acc",   nan))
+            silo_parts.append(f"s{i}[I={sir_i} ev={n_ev} {did}tr={tr_i} dg={dg_i}]")
         i += 1
 
     print(
-        f"  Round {round_num:>3}/{total} | "
+        f"  Round {round_num:>3}/~{max_rounds} | "
         f"loss={_fmt(agg_loss,4)} "
         f"triage={_fmt(triage)} diag={_fmt(diag)} "
         f"f1={_fmt(macro_f1)} danger={_fmt(danger)} "
@@ -374,7 +434,9 @@ def _print_round(round_num: int, total: int, log: dict, elapsed: float) -> None:
 def _parse_args() -> FLTrainConfig:
     p = argparse.ArgumentParser(description="FedWorld FL training loop")
     p.add_argument("--silos",       type=int,   default=3)
-    p.add_argument("--rounds",      type=int,   default=10)
+    p.add_argument("--max-rounds",  type=int,   default=100,
+                   dest="max_rounds",
+                   help="Safety cap on FL rounds; run ends earlier when all silos done")
     p.add_argument("--agents",      type=int,   default=30)
     p.add_argument("--sim-days",    type=int,   default=7,
                    help="Simulated days per FL round")
@@ -385,9 +447,12 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--batch-size",  type=int,   default=8)
     p.add_argument("--lr",          type=float, default=1e-4)
     p.add_argument("--lora-rank",   type=int,   default=8)
-    p.add_argument("--progression",         type=str,   default="Standard Flu")
+    p.add_argument("--progressions", nargs="+", default=["Standard Flu"],
+                   help="One or more disease progressions circulating in all silos")
+    p.add_argument("--disease-strategy", type=str, default="Standard Flu",
+                   dest="disease_strategy")
     p.add_argument("--seed",                type=int,   default=42)
-    p.add_argument("--end-condition",       type=str,   default="horizon",
+    p.add_argument("--end-condition",       type=str,   default="extinction",
                    choices=["horizon", "extinction", "no_susceptibles", "budget"])
     p.add_argument("--end-condition-param", type=int,   default=None,
                    help="max_days / consecutive_days / target_events")
@@ -399,24 +464,25 @@ def _parse_args() -> FLTrainConfig:
                    help="Skip Ollama doctor; use rule-based stub (faster, no LLM calls)")
     a = p.parse_args()
     return FLTrainConfig(
-        num_silos       = a.silos,
-        num_rounds      = a.rounds,
-        num_agents      = a.agents,
-        sim_days        = a.sim_days,
-        local_epochs    = a.epochs,
-        batch_size      = a.batch_size,
-        lr              = a.lr,
-        lora_rank       = a.lora_rank,
-        progression     = a.progression,
+        num_silos           = a.silos,
+        max_rounds          = a.max_rounds,
+        num_agents          = a.agents,
+        sim_days            = a.sim_days,
+        local_epochs        = a.epochs,
+        batch_size          = a.batch_size,
+        lr                  = a.lr,
+        lora_rank           = a.lora_rank,
+        progressions        = a.progressions,
+        disease_strategy    = a.disease_strategy,
         seed                = a.seed,
         min_events_to_train = a.min_events_to_train,
         end_condition       = a.end_condition,
         end_condition_param = a.end_condition_param,
         wandb_project       = a.project,
-        wandb_run_name  = a.run_name,
-        wandb_entity    = a.entity,
-        wandb_offline   = a.offline,
-        use_ollama      = not a.no_ollama,
+        wandb_run_name      = a.run_name,
+        wandb_entity        = a.entity,
+        wandb_offline       = a.offline,
+        use_ollama          = not a.no_ollama,
     )
 
 

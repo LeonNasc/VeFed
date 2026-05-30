@@ -27,6 +27,7 @@ from simulation.symptom_language import Personality
 from simulation.models import (
     Agent, DailySchedule, DiseaseCloud,
     DiagnosticEvent, HealthStatus, Location, LocationType, SIRModel,
+    REFRACTORY_DAYS,
 )
 from simulation.end_conditions import EndCondition
 
@@ -196,14 +197,23 @@ class WorldEngine:
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
                  progression_strategy: DiseaseProgressionStrategy | None = None,
+                 progression_strategies: list[DiseaseProgressionStrategy] | None = None,
                  end_condition: EndCondition | None = None,
-                 background_visit_rate: float = 0.025):
+                 background_visit_rate: float = 0.025,
+                 beta_scale: float = 1.0):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
-        self.progression: DiseaseProgressionStrategy = (
-            progression_strategy or StandardFluProgression()
-        )
+        self._beta_scale: float = beta_scale
+
+        # Build the progression list (multi-disease when progression_strategies provided)
+        if progression_strategies:
+            self.progressions: list[DiseaseProgressionStrategy] = list(progression_strategies)
+        elif progression_strategy:
+            self.progressions = [progression_strategy]
+        else:
+            self.progressions = [StandardFluProgression()]
+        self.progression = self.progressions[0]  # backward-compat alias
 
         # ── Generate world via WFC ──────────────────────────────────────
         n_locs       = max(10, num_agents // 3)
@@ -246,7 +256,8 @@ class WorldEngine:
         from simulation.case_table import CaseTable
         seed_agents = self._rng.sample(self.agents, min(3, len(self.agents)))
         for seed_agent in seed_agents:
-            _traj = self.progression.sample_trajectory(self._rng)
+            _prog = self._rng.choice(self.progressions)
+            _traj = _prog.sample_trajectory(self._rng)
             seed_agent.health_state.infect(_traj)
             if hasattr(_traj, "_record"):
                 from simulation.case_table import MimicCaseTable
@@ -340,7 +351,7 @@ class WorldEngine:
                 if self.agents_by_id[aid].is_infectious
             )
             prevalence = n_infectious / n_present if n_present > 0 else 0.0
-            beta = self.BASE_BETA * self.strategy.transmission_rate(agent.current_type)
+            beta = self.BASE_BETA * self._beta_scale * self.strategy.transmission_rate(agent.current_type)
             eps = (beta * prevalence + loc.ambient_exposure()) / self.TICKS_PER_DAY
             agent.update_health(eps)
 
@@ -450,7 +461,7 @@ class WorldEngine:
         # Stochastic S→I transitions for accumulated daily exposure (eq. 3)
         newly_infected = []
         for agent in self.agents:
-            if agent.apply_daily_infection(self.progression):
+            if agent.apply_daily_infection(self.progressions):
                 newly_infected.append(agent.name)
             agent.reset_daily_exposure()
 
@@ -459,9 +470,24 @@ class WorldEngine:
                 f"Day {self.current_day}: Infected → {', '.join(newly_infected)}"
             )
 
-        # Progress internal health states (eq. 4/5)
+        # Progress internal health states (eq. 4/5) + refractory period handling
         for agent in self.agents:
             agent.health_state.step()
+
+            curr = agent.health_state.status
+            prev = agent._prev_status
+
+            # Detect RECOVERING → RECOVERED: start refractory countdown
+            if prev == HealthStatus.RECOVERING and curr == HealthStatus.RECOVERED:
+                agent._refractory_days = REFRACTORY_DAYS
+            # Count down refractory; release back to SUSCEPTIBLE when done
+            elif curr == HealthStatus.RECOVERED and agent._refractory_days > 0:
+                agent._refractory_days -= 1
+                if agent._refractory_days == 0:
+                    agent.health_state.status = HealthStatus.SUSCEPTIBLE
+                    curr = HealthStatus.SUSCEPTIBLE
+            agent._prev_status = curr
+
             if agent.hospitalised and agent.status in (
                 HealthStatus.RECOVERING, HealthStatus.RECOVERED
             ):

@@ -1,6 +1,6 @@
 # Module View — Federated Simulated World
 
-**Last updated: 2026-05-29 (session 3)**
+**Last updated: 2026-05-29 (session 6)**
 
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
@@ -28,9 +28,9 @@ graph TD
     end
 
     subgraph fl["fl/"]
-        BASE["base_client.py\nWorldFLClient"]
+        BASE["base_client.py\nWorldFLClient\ntry_accept_global()"]
         LORA["lora.py\nLoRAConfig · build_model\nget/set_lora_weights"]
-        TRAIN["train.py\nFLTrainConfig\nrun_federated_training\n_fedavg"]
+        TRAIN["train.py\nFLTrainConfig · WorldConfig\nrun_federated_training\n_fedavg"]
         SERVER["server.py\nWandBFedAvg\nrun_flower_server"]
         FLWR["flwr_client.py\nmake_flower_client\nstart_flower_client"]
         FEDN["fedn_client.py\nmake_fedn_callbacks\nrun_fedn_client"]
@@ -46,7 +46,7 @@ graph TD
         PYG["pygame_ui.py\nPygameUI"]
     end
 
-    MAIN["main.py\nlauncher"]
+    RUN["run.py\nlauncher · presets\nRunConfig"]
 
     %% simulation internal deps
     WE --> MOD
@@ -79,11 +79,12 @@ graph TD
     RTUI --> WE
     PYG --> WE
 
-    %% main deps
-    MAIN --> WE
-    MAIN --> OLL
-    MAIN --> ILOG
-    MAIN --> TUI
+    %% run.py deps
+    RUN --> WE
+    RUN --> OLL
+    RUN --> ILOG
+    RUN --> TUI
+    RUN --> TRAIN
 
     %% fl also uses ollama (wired at run_federated_training startup)
     TRAIN --> OLL
@@ -174,51 +175,45 @@ flowchart LR
 
 ## View C — FL Round Sequence
 
+Round count is **simulation-guided** — the loop runs until all silos hit their end condition
+(default: `ExtinctionCondition`, I=0 for 3 consecutive days) or `max_rounds` is reached.
+Silos that finish early enter **frozen mode**: they re-upload their last model each round
+and conditionally accept the global model only if it doesn't regress on their frozen eval batch.
+
 ```mermaid
 sequenceDiagram
     participant Loop as run_federated_training()
-    participant S0 as Silo 0 (WorldFLClient)
-    participant S1 as Silo 1 (WorldFLClient)
-    participant SN as Silo N-1
+    participant SA as Active Silo (WorldFLClient)
+    participant SD as Done Silo (WorldFLClient)
     participant OLL as OllamaDiagnosticClient
     participant WB as Weights & Biases
 
-    Note over Loop: Round r = 1..num_rounds
+    Note over Loop: Round r = 1..max_rounds (exits early when all done)
 
-    Loop->>S0: set_weights(global_weights)
-    Loop->>S1: set_weights(global_weights)
-    Loop->>SN: set_weights(global_weights)
+    Loop->>SA: set_weights(global_weights)
+    Loop->>SD: try_accept_global(global_weights, threshold=0.10)
+    Note over SD: Eval global on frozen batch.<br/>Accept if triage_acc drop ≤ 10 %,<br/>else revert to frozen weights.
 
-    par simulate + train (per silo)
-        S0->>S0: run_simulation_round() — sim_days ticks
-        S0->>S0: train_on_events() — local LoRA fine-tune
-        S0->>S0: evaluate() — post-train loss + accuracy
-    and
-        S1->>S1: run_simulation_round()
-        S1->>S1: train_on_events()
-        S1->>S1: evaluate()
-    and
-        SN->>SN: run_simulation_round()
-        SN->>SN: train_on_events()
-        SN->>SN: evaluate()
+    par active silo
+        SA->>SA: run_simulation_round() — sim_days × TICKS_PER_DAY
+        SA->>SA: evaluate() — pre-train metrics on new events
+        SA->>SA: train_on_events() — local LoRA fine-tune
+    and done silo (frozen)
+        SD->>SD: _run_frozen_round() — no simulation, returns cached metrics
     end
 
-    S0-->>Loop: weights_0, metrics_0 (loss, acc, SIR, num_events)
-    S1-->>Loop: weights_1, metrics_1
-    SN-->>Loop: weights_N, metrics_N
+    SA-->>Loop: weights (updated), metrics, n_examples
+    SD-->>Loop: weights (frozen/accepted), frozen_n for FedAvg weight
 
-    Loop->>Loop: global_weights = _fedavg([w0..wN], [n0..nN])
+    Loop->>Loop: global_weights = _fedavg([all weights], [n_examples or frozen_n])
 
-    Note over Loop: Federated few-shot update
-    Loop->>Loop: round_events = all silos' last_round_events
-    Loop->>OLL: update_examples(round_events)<br/>best cross-silo conversations → Ollama prompt
-    Note over OLL: Doctor improves next round:<br/>faster decisions, better calibration
-
-    Loop->>WB: wandb.log({silo_i/*, aggregated/*,<br/>llm_few_shot_examples}, step=r)
+    Note over Loop: Federated few-shot update (active silos only)
+    Loop->>OLL: update_examples(round_events)
+    Loop->>WB: wandb.log({silo_i/*, aggregated/*}, step=r)
 
     alt all silos is_done
         Loop->>WB: wandb.log({aggregated/all_silos_done: 1})
-        Note over Loop: Early exit
+        Note over Loop: Early exit — epidemic extinct
     end
 ```
 
@@ -235,6 +230,27 @@ sequenceDiagram
 | LoRA weights | `WorldFLClient.get_weights()` | `_fedavg()` | list of np.ndarray (q_lin + v_lin adapters only) |
 | `run_round()` dict | `WorldFLClient` | `run_federated_training()` | loss, accuracy (ICD-cat+mgmt), icd_exact_acc, icd_category_acc, mgmt_acc, SIR, num_events |
 | W&B log dict | `run_federated_training()` | `wandb.log()` | silo_N/\* + aggregated/\* including icd_category_acc, mgmt_acc |
+
+## Run Presets (`python run.py --preset <name>`)
+
+| Preset | Silos | Agents | Diseases | Notes |
+|---|:---:|:---:|---|---|
+| `smoke` | 2 | 15 | Standard Flu | Fastest; offline W&B, no Ollama. Use for CI/debugging. |
+| `standard` | 3 | 60 | Flu + Mild Corona | Default research run. |
+| `multi-disease` | 5 | 100 | Flu, Corona, Slow Burn, Aggressive Flu | IID multi-disease; tests disease identity classification. |
+| `non-iid` | 5 | varies | per silo (WorldConfig) | Asymmetric: different disease, beta_scale, population per silo. Key FL research configuration. |
+| `hard-triage` | 3 | 80 | Slow Burn + Deadly | Maximum triage difficulty: plateau symptoms + near-zero decay. |
+
+Wizard: select a preset at startup, then optionally customize individual fields.
+CLI: `--preset <name>` loads the preset; any additional flags override specific fields.
+
+## Multi-Disease Dynamics
+
+When `progression_strategies` contains multiple diseases:
+- Each susceptible agent that crosses the infection threshold is assigned one disease drawn **uniformly at random** from the list.
+- The **single-disease-slot rule** (`HealthState.infect()` guards against double-infection) ensures agents can only carry one disease at a time.
+- A **14-day refractory period** (`REFRACTORY_DAYS`) runs after recovery before the agent re-enters `SUSCEPTIBLE`. This prevents weekly cycling through multiple diseases.
+- Non-IID silos use `WorldConfig.progressions` to give each silo its own disease mix; FedAvg shares learned weights across disease boundaries.
 
 ## ICD-10 Accuracy Scoring
 

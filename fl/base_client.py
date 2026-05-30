@@ -128,6 +128,12 @@ class WorldFLClient:
         self._model = None  # lazy-built on first use
         self.last_round_events: list = []   # events from the most recent round
 
+        # Frozen-silo state — populated when world.is_done fires
+        self._frozen_weights:    Optional[list] = None
+        self._frozen_eval_batch: list           = []
+        self._frozen_triage_acc: float          = 0.0
+        self._frozen_n:          int            = 0   # FedAvg weight for done silo
+
     @property
     def model(self):
         if self._model is None:
@@ -365,6 +371,76 @@ class WorldFLClient:
         except ImportError:
             pass
 
+    # ── Frozen-silo helpers ────────────────────────────────────────────────────
+
+    def try_accept_global(
+        self, global_weights: list, threshold: float = 0.10
+    ) -> bool:
+        """
+        For done silos: evaluate the global model on the frozen evaluation batch.
+        Accept if triage_acc degradation ≤ threshold; otherwise revert to frozen weights.
+
+        The frozen batch is the last active round's events — the best available proxy
+        for whether the global model still serves this silo's patient population.
+        Returns True if the global model was accepted.
+        """
+        if not self._frozen_eval_batch:
+            return True  # nothing to protect; accept unconditionally
+
+        set_lora_weights(self.model, global_weights)
+        global_metrics = self.evaluate(self._frozen_eval_batch)
+        global_acc = global_metrics.get("triage_acc", float("nan"))
+
+        if global_acc != global_acc:  # NaN — evaluation failed
+            set_lora_weights(self.model, self._frozen_weights)
+            return False
+
+        if self._frozen_triage_acc - global_acc > threshold:
+            # Regression too large — revert
+            set_lora_weights(self.model, self._frozen_weights)
+            return False
+
+        # Accept — update frozen reference to the new accepted weights
+        self._frozen_weights    = self.get_weights()
+        self._frozen_triage_acc = global_acc
+        return True
+
+    def _run_frozen_round(self) -> dict:
+        """
+        Called when world.is_done. No simulation, no training.
+        On first call: snapshots weights + eval batch.
+        Subsequent calls: returns frozen metrics immediately.
+        """
+        if self._frozen_weights is None:
+            self._frozen_weights    = self.get_weights()
+            self._frozen_eval_batch = list(self.last_round_events)
+            if self._frozen_eval_batch:
+                m = self.evaluate(self._frozen_eval_batch)
+                self._frozen_triage_acc = m.get("triage_acc", 0.0)
+            # FedAvg weight: max of actual batch size and min_events_to_train
+            self._frozen_n = max(len(self._frozen_eval_batch), self.min_events_to_train)
+
+        sir = self.world.sir_model
+        return {
+            "loss":             float("nan"),
+            "num_examples":     0,
+            "triage_acc":       self._frozen_triage_acc,
+            "diag_acc":         float("nan"),
+            "icd_exact_acc":    float("nan"),
+            "combined_acc":     float("nan"),
+            "triage_macro_f1":  float("nan"),
+            "triage_f1":        {},
+            "danger_rate":      float("nan"),
+            "per_class":        {},
+            "trained_on":       0,
+            "trained":          0,
+            "num_events":       0,
+            "epoch_losses":     [],
+            "sir_s":            sir.S,
+            "sir_i":            sir.I,
+            "sir_r":            sir.R,
+        }
+
     # ── Convenience ────────────────────────────────────────────────────────────
 
     def run_round(self) -> dict:
@@ -385,6 +461,9 @@ class WorldFLClient:
         epoch_losses                  — per-epoch mean training loss ([] if skipped)
         sir_s, sir_i, sir_r           — SIR state after simulation
         """
+        if self.world.is_done:
+            return self._run_frozen_round()
+
         events     = self.run_simulation_round()
         self.last_round_events = events
         num_events = len(events)

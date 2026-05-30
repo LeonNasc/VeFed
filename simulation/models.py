@@ -11,6 +11,9 @@ from typing import Optional
 from simulation.symptom_language import Personality, SymptomNarrator
 from simulation.case_table import CaseTable
 
+# Days after recovery before an agent can be re-infected (multi-disease guard).
+REFRACTORY_DAYS = 14
+
 
 # ─── Enumerations ────────────────────────────────────────────────────────────
 
@@ -293,6 +296,8 @@ class Agent:
         self._narrator         = SymptomNarrator(rng)
         self._case_table       = None  # set at infection
         self._care_cooldown:   int   = 0   # days until next clinic visit allowed
+        self._refractory_days: int   = 0   # days until re-susceptible after recovery
+        self._prev_status:     HealthStatus = HealthStatus.SUSCEPTIBLE
         self.log:              list[str] = []
 
     def move_to(self, location_id: str, loc_type: LocationType) -> None:
@@ -307,17 +312,22 @@ class Agent:
         """
         At end of day, stochastic S→I transition: eq. 3.
         Samples a DiseaseTrajectory from progression strategy.
+        progression may be a single DiseaseProgressionStrategy or a list (multi-disease);
+        in the list case one disease is chosen uniformly at random.
         Returns True if newly infected.
         """
         if self.health_state.status != HealthStatus.SUSCEPTIBLE:
             return False
         p_infect = 1.0 - math.exp(-self.cumulative_exposure)
         if self._rng.random() < p_infect:
-            if progression is not None:
-                traj = progression.sample_trajectory(self._rng)
+            if isinstance(progression, list):
+                chosen = self._rng.choice(progression)
+            elif progression is not None:
+                chosen = progression
             else:
                 from simulation.progression import StandardFluProgression
-                traj = StandardFluProgression().sample_trajectory(self._rng)
+                chosen = StandardFluProgression()
+            traj = chosen.sample_trajectory(self._rng)
             self.health_state.infect(traj)
             # MIMIC trajectories carry their own vitals — use MimicCaseTable
             if hasattr(traj, "_record"):
