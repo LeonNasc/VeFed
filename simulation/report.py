@@ -59,24 +59,29 @@ class RunReport:
         event lists (one per silo from silo.last_round_events).
         """
         n_silos = self.cfg.num_silos
+        nan = float("nan")
         silos = []
         for i in range(n_silos):
             silos.append({
-                "sir_s":    int(log.get(f"silo_{i}/sir_s",    0)),
-                "sir_i":    int(log.get(f"silo_{i}/sir_i",    0)),
-                "sir_r":    int(log.get(f"silo_{i}/sir_r",    0)),
-                "events":   int(log.get(f"silo_{i}/num_events", 0)),
-                "mgmt_acc": log.get(f"silo_{i}/mgmt_acc",    float("nan")),
-                "trained":  bool(log.get(f"silo_{i}/trained", 0)),
-                "done":     bool(log.get(f"silo_{i}/done",    0)),
+                "sir_s":      int(log.get(f"silo_{i}/sir_s",      0)),
+                "sir_i":      int(log.get(f"silo_{i}/sir_i",      0)),
+                "sir_r":      int(log.get(f"silo_{i}/sir_r",      0)),
+                "events":     int(log.get(f"silo_{i}/num_events",  0)),
+                "triage_acc": log.get(f"silo_{i}/triage_acc",    nan),
+                "diag_acc":   log.get(f"silo_{i}/diag_acc",      nan),
+                "trained":    bool(log.get(f"silo_{i}/trained",   0)),
+                "done":       bool(log.get(f"silo_{i}/done",      0)),
             })
 
         self._rounds.append({
             "round":    round_num,
             "silos":    silos,
-            "agg_loss": log.get("aggregated/loss",     float("nan")),
-            "agg_acc":  log.get("aggregated/mgmt_acc", float("nan")),
-            "n_trained": int(log.get("aggregated/num_trained", 0)),
+            "agg_loss":    log.get("aggregated/loss",           float("nan")),
+            "agg_triage":  log.get("aggregated/triage_acc",    float("nan")),
+            "agg_diag":    log.get("aggregated/diag_acc",      float("nan")),
+            "agg_f1":      log.get("aggregated/triage_macro_f1", float("nan")),
+            "agg_danger":  log.get("aggregated/danger_rate",   float("nan")),
+            "n_trained":   int(log.get("aggregated/num_trained", 0)),
         })
 
         # Harvest up to 2 rich conversations per silo per round
@@ -121,24 +126,30 @@ class RunReport:
 
         # ── Round table ───────────────────────────────────────────────────────
         silo_th = "".join(
-            f"<th>S{i} S/I/R</th><th>S{i} ev</th><th>S{i} mgmt%</th>"
+            f"<th>S{i} S/I/R</th><th>S{i} ev</th><th>S{i} triage</th><th>S{i} diag</th>"
             for i in range(n_s)
         )
         rows = ""
         for r in self._rounds:
             cells = f'<td class="rn">{r["round"]}</td>'
             for i, s in enumerate(r["silos"]):
-                sir = f'{s["sir_s"]}/{s["sir_i"]}/{s["sir_r"]}'
-                acc = _pct(s["mgmt_acc"]) if s["trained"] else "—"
-                done_mark = " ✓" if s["done"] else ""
+                sir  = f'{s["sir_s"]}/{s["sir_i"]}/{s["sir_r"]}'
+                tr   = _pct(s["triage_acc"]) if s["trained"] else "—"
+                dg   = _pct(s["diag_acc"])   if s["trained"] else "—"
+                done = " ✓" if s["done"] else ""
                 cells += (
-                    f'<td class="sir">{sir}{done_mark}</td>'
+                    f'<td class="sir">{sir}{done}</td>'
                     f'<td>{s["events"]}</td>'
-                    f'<td class="acc">{acc}</td>'
+                    f'<td class="acc">{tr}</td>'
+                    f'<td class="acc">{dg}</td>'
                 )
-            ma = _pct(r["agg_acc"])
-            lo = _f(r["agg_loss"])
-            cells += f'<td class="agg">{ma}</td><td class="agg">{lo}</td>'
+            cells += (
+                f'<td class="agg">{_pct(r["agg_triage"])}</td>'
+                f'<td class="agg">{_pct(r["agg_diag"])}</td>'
+                f'<td class="agg">{_f(r["agg_f1"])}</td>'
+                f'<td class="agg" style="color:#f85149">{_pct(r["agg_danger"])}</td>'
+                f'<td class="agg">{_f(r["agg_loss"])}</td>'
+            )
             rows += f"<tr>{cells}</tr>\n"
 
         # ── Conversations ─────────────────────────────────────────────────────
@@ -176,7 +187,10 @@ class RunReport:
         n_conv    = len(self._convs)
         conv_acc  = _pct(n_correct / n_conv) if n_conv else "—"
         trained_rounds = [r for r in self._rounds if r["n_trained"] > 0]
-        best_acc  = max((r["agg_acc"] for r in trained_rounds), default=float("nan"))
+        best_acc  = max((r["agg_triage"] for r in trained_rounds if r["agg_triage"] == r["agg_triage"]), default=float("nan"))
+        best_diag = max((r["agg_diag"]   for r in trained_rounds if r["agg_diag"]   == r["agg_diag"]),   default=float("nan"))
+        danger_vals = [r["agg_danger"] for r in trained_rounds if r["agg_danger"] == r["agg_danger"]]
+        avg_danger  = sum(danger_vals) / len(danger_vals) if danger_vals else float("nan")
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -240,7 +254,7 @@ tr:hover td{{background:#161b22}}
 
 <h2>Round-by-Round Metrics</h2>
 <table>
-<tr><th>Round</th>{silo_th}<th>Agg mgmt%</th><th>Agg loss</th></tr>
+<tr><th>Round</th>{silo_th}<th>Agg triage%</th><th>Agg diag%</th><th>Macro-F1</th><th>Danger rate</th><th>Agg loss</th></tr>
 {rows}
 </table>
 
@@ -248,8 +262,10 @@ tr:hover td{{background:#161b22}}
 <div class="summary">
   <div class="stat"><div class="stat-val">{total_ev}</div><div class="stat-label">Total clinic events</div></div>
   <div class="stat"><div class="stat-val">{n_conv}</div><div class="stat-label">Conversations logged</div></div>
-  <div class="stat"><div class="stat-val">{conv_acc}</div><div class="stat-label">LLM mgmt accuracy (logged convs)</div></div>
-  <div class="stat"><div class="stat-val">{_pct(best_acc)}</div><div class="stat-label">Best aggregated mgmt acc</div></div>
+  <div class="stat"><div class="stat-val">{conv_acc}</div><div class="stat-label">LLM triage accuracy (logged convs)</div></div>
+  <div class="stat"><div class="stat-val">{_pct(best_acc)}</div><div class="stat-label">Best LoRA triage acc</div></div>
+  <div class="stat"><div class="stat-val">{_pct(best_diag)}</div><div class="stat-label">Best LoRA diag acc</div></div>
+  <div class="stat" style="border-color:#f85149"><div class="stat-val" style="color:#f85149">{_pct(avg_danger)}</div><div class="stat-label">Avg danger rate (miss hospitalise)</div></div>
   <div class="stat"><div class="stat-val">{len(self._rounds)}</div><div class="stat-label">Rounds run</div></div>
 </div>
 

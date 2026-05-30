@@ -238,17 +238,20 @@ class WorldFLClient:
 
     def evaluate(self, events: Optional[list] = None) -> dict:
         """
-        Evaluate LoRA model on events.
+        Evaluate the current LoRA model on events (call BEFORE training them).
 
         Returns
         -------
-        loss, num_examples  — standard metrics
-        icd_exact_acc       — % predictions with exact ICD subcategory match
-        icd_category_acc    — % predictions with 3-char ICD category match (lenient)
-        mgmt_acc            — % predictions with correct management tier
-        accuracy            — combined lenient: ICD category correct AND mgmt correct
-                              (primary metric; this is what we optimise)
-        per_class           — {label: accuracy} for each (icd/mgmt) combination seen
+        triage_acc      — % correct management tier (home rest / treat / hospitalise)
+        diag_acc        — % correct ICD 3-char category (disease identity)
+        icd_exact_acc   — % exact ICD subcategory match (harder; analysis only)
+        combined_acc    — triage AND diag both correct
+        triage_macro_f1 — macro-averaged F1 across the 3 triage tiers
+        triage_f1       — {tier: {precision, recall, f1}} per triage class
+        danger_rate     — P(predicted=home_rest | truth=hospitalise): the most
+                          clinically harmful error (under-triage)
+        per_class       — {label: acc} for each (ICD/mgmt) combination seen
+        loss, num_examples
         """
         import torch
         from collections import defaultdict
@@ -258,9 +261,11 @@ class WorldFLClient:
         texts, labels = self._build_dataset(events)
         if not texts:
             return {
-                "loss": 0.0, "accuracy": 0.0,
-                "icd_exact_acc": 0.0, "icd_category_acc": 0.0,
-                "mgmt_acc": 0.0, "per_class": {}, "num_examples": 0,
+                "loss": float("nan"), "num_examples": 0,
+                "triage_acc": float("nan"), "diag_acc": float("nan"),
+                "icd_exact_acc": float("nan"), "combined_acc": float("nan"),
+                "triage_macro_f1": float("nan"), "triage_f1": {},
+                "danger_rate": float("nan"), "per_class": {},
             }
 
         tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
@@ -270,28 +275,32 @@ class WorldFLClient:
         )
         label_t = torch.tensor(labels, dtype=torch.long).to(self.device)
 
-        model = self.model
-        model.eval()
+        self.model.eval()
         with torch.no_grad():
-            out = model(
+            out = self.model(
                 input_ids=enc["input_ids"].to(self.device),
                 attention_mask=enc["attention_mask"].to(self.device),
                 labels=label_t,
             )
 
-        preds      = out.logits.argmax(dim=-1).cpu().tolist()
-        true_idxs  = label_t.cpu().tolist()
+        preds     = out.logits.argmax(dim=-1).cpu().tolist()
+        true_idxs = label_t.cpu().tolist()
+        n = len(preds)
 
         icd_exact = icd_cat = mgmt_ok = combined = 0
         per_class_correct: dict[str, int] = defaultdict(int)
         per_class_total:   dict[str, int] = defaultdict(int)
+        # Per-triage confusion for F1 and danger rate
+        triage_tp: dict[str, int] = defaultdict(int)
+        triage_fp: dict[str, int] = defaultdict(int)
+        triage_fn: dict[str, int] = defaultdict(int)
+        danger = 0   # predicted home_rest when truth is hospitalise
 
         for pred_idx, true_idx in zip(preds, true_idxs):
             pred_lbl = self._id2label[pred_idx]
             true_lbl = self._id2label[true_idx]
-
-            pred_icd,  pred_mgmt  = pred_lbl.rsplit(" / ", 1)
-            true_icd,  true_mgmt  = true_lbl.rsplit(" / ", 1)
+            pred_icd, pred_mgmt = pred_lbl.rsplit(" / ", 1)
+            true_icd, true_mgmt = true_lbl.rsplit(" / ", 1)
 
             exact = pred_icd == true_icd
             cat   = pred_icd[:3] == true_icd[:3]
@@ -305,18 +314,41 @@ class WorldFLClient:
             per_class_total[true_lbl]   += 1
             per_class_correct[true_lbl] += int(cat and mgmt)
 
-        n = len(preds)
+            if mgmt:
+                triage_tp[true_mgmt] += 1
+            else:
+                triage_fp[pred_mgmt] += 1
+                triage_fn[true_mgmt] += 1
+                if true_mgmt == "hospitalise" and pred_mgmt == "home rest":
+                    danger += 1
+
+        # Per-triage F1
+        tiers = ("home rest", "treat", "hospitalise")
+        triage_f1: dict[str, dict] = {}
+        for tier in tiers:
+            tp = triage_tp[tier]; fp = triage_fp[tier]; fn = triage_fn[tier]
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+            triage_f1[tier] = {"precision": prec, "recall": rec, "f1": f1}
+        macro_f1 = sum(v["f1"] for v in triage_f1.values()) / len(tiers)
+
+        n_hosp_true = triage_tp["hospitalise"] + triage_fn["hospitalise"]
+
         return {
             "loss":             float(out.loss),
-            "accuracy":         combined / n,          # primary: ICD category + mgmt
+            "num_examples":     n,
+            "triage_acc":       mgmt_ok   / n,
+            "diag_acc":         icd_cat   / n,
             "icd_exact_acc":    icd_exact / n,
-            "icd_category_acc": icd_cat / n,
-            "mgmt_acc":         mgmt_ok / n,
+            "combined_acc":     combined  / n,
+            "triage_macro_f1":  macro_f1,
+            "triage_f1":        triage_f1,
+            "danger_rate":      danger / n_hosp_true if n_hosp_true > 0 else float("nan"),
             "per_class": {
                 k: per_class_correct[k] / per_class_total[k]
                 for k in per_class_total
             },
-            "num_examples": n,
         }
 
     # ── Memory management ──────────────────────────────────────────────────────
@@ -358,13 +390,16 @@ class WorldFLClient:
         num_events = len(events)
         sir        = self.world.sir_model
 
+        # Evaluate with the current (global) weights BEFORE training.
+        # This gives generalisation accuracy on unseen cases — the model
+        # hasn't seen this round's events during any prior training step.
+        metrics = self.evaluate(events)
+
         if num_events >= self.min_events_to_train:
             n, epoch_losses = self.train_on_events(events)
-            metrics = self.evaluate(events)
             trained = 1
         else:
             n, epoch_losses = 0, []
-            metrics = {"loss": float("nan"), "accuracy": float("nan"), "num_examples": 0}
             trained = 0
 
         metrics.update(
