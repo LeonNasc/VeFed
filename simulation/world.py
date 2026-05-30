@@ -201,7 +201,8 @@ class WorldEngine:
                  end_condition: EndCondition | None = None,
                  background_visit_rate: float = 0.025,
                  beta_scale: float = 1.0,
-                 reveal_incubating_icd: bool = True):
+                 reveal_incubating_icd: bool = True,
+                 initial_seeds: int = 3):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
@@ -253,10 +254,8 @@ class WorldEngine:
             self.agents_by_id[agent.id] = agent
 
         # ── Seed initial infections ─────────────────────────────────────
-        # 3 seeds: reduces stochastic extinction probability from ~50% to ~10%
-        # when R0 ≈ 2 and incubation suppresses early transmission.
         from simulation.case_table import CaseTable
-        seed_agents = self._rng.sample(self.agents, min(3, len(self.agents)))
+        seed_agents = self._rng.sample(self.agents, min(initial_seeds, len(self.agents)))
         for seed_agent in seed_agents:
             _prog = self._rng.choice(self.progressions)
             _traj = _prog.sample_trajectory(self._rng)

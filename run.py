@@ -60,6 +60,8 @@ class RunConfig:
     # Non-IID: list of WorldConfig dicts (set by presets; None = all silos identical)
     world_configs:          Optional[list] = None
     reveal_incubating_icd:  bool           = True
+    beta_scale:             float          = 1.0
+    initial_seeds:          int            = 3
 
     def __post_init__(self):
         if self.progressions is None:
@@ -162,6 +164,27 @@ def _make_presets() -> dict[str, RunConfig]:
             min_events_to_train = 8,
             local_epochs        = 3,
         ),
+
+        # ── long-burn ─────────────────────────────────────────────────────────
+        # Designed for embedding evolution studies: large populations + slower
+        # spread keep all silos alive for 30+ rounds at 2 sim-days/round.
+        # - 300 agents/silo: more susceptibles → epidemic takes much longer to exhaust
+        # - beta_scale=0.6: slower spread without changing R0 shape
+        # - initial_seeds=8: ~2.7% seeding prevents stochastic early die-off
+        # - sim_days=2: dense round sequence → better embedding evolution tracking
+        "long-burn": RunConfig(
+            mode                = "fl",
+            num_agents          = 300,
+            num_silos           = 3,
+            progressions        = ["Slow Burn", "Deadly"],
+            disease_strategy    = "Standard Flu",
+            end_condition       = "extinction",
+            min_events_to_train = 5,
+            local_epochs        = 3,
+            sim_days            = 2,
+            beta_scale          = 0.6,
+            initial_seeds       = 8,
+        ),
     }
 
 
@@ -171,6 +194,7 @@ PRESET_DESCRIPTIONS = {
     "multi-disease":"5 silos · 100 agents · 4 diseases (IID) · tests disease identity",
     "non-iid":      "5 silos · asymmetric disease mix, population, and spread per silo",
     "hard-triage":  "3 silos · Slow Burn + Deadly · maximum triage difficulty",
+    "long-burn":    "3 silos · 300 agents · Slow Burn + Deadly · sim_days=2 · designed for embedding studies",
 }
 
 
@@ -494,8 +518,12 @@ def _parse_cli() -> RunConfig:
     p.add_argument("--epochs",     type=int, default=None, dest="local_epochs")
     p.add_argument("--wandb-project",  default=None, dest="wandb_project")
     p.add_argument("--wandb-run-name", default=None, dest="wandb_run_name")
-    p.add_argument("--offline",    action="store_true", default=False, dest="wandb_offline")
-    p.add_argument("--no-ollama",  action="store_true", default=False)
+    p.add_argument("--offline",        action="store_true", default=False, dest="wandb_offline")
+    p.add_argument("--no-ollama",      action="store_true", default=False)
+    p.add_argument("--beta-scale",     type=float, default=None, dest="beta_scale",
+                   help="Transmission rate multiplier (default 1.0; <1 slows spread)")
+    p.add_argument("--initial-seeds",  type=int,   default=None, dest="initial_seeds",
+                   help="Number of agents infected at simulation start (default 3)")
 
     a = p.parse_args()
 
@@ -522,6 +550,8 @@ def _parse_cli() -> RunConfig:
     if a.wandb_run_name    is not None: cfg.wandb_run_name      = a.wandb_run_name
     if a.wandb_offline:                 cfg.wandb_offline       = True
     if a.no_ollama:                     cfg.use_ollama          = False
+    if a.beta_scale    is not None:     cfg.beta_scale          = a.beta_scale
+    if a.initial_seeds is not None:     cfg.initial_seeds       = a.initial_seeds
 
     # Ensure mode defaults to fl when a preset is used
     if a.preset and a.mode is None:
@@ -633,6 +663,8 @@ def _launch_fl(cfg: RunConfig) -> None:
         wandb_offline       = cfg.wandb_offline,
         use_ollama          = cfg.use_ollama,
         world_configs       = cfg.world_configs,
+        beta_scale          = cfg.beta_scale,
+        initial_seeds       = cfg.initial_seeds,
     )
     run_federated_training(fl_cfg)
 

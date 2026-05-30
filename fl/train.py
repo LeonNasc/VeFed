@@ -75,6 +75,7 @@ class WorldConfig:
     end_condition_param:   Optional[int] = None
     seed_offset:           int         = 0
     reveal_incubating_icd: bool        = True
+    initial_seeds:         int         = 3
 
 
 # ── Config dataclass ──────────────────────────────────────────────────────────
@@ -98,6 +99,9 @@ class FLTrainConfig:
     seed:                int         = 42
     # Per-silo non-IID config (overrides global params when provided)
     world_configs:       Optional[list[WorldConfig]] = None
+    # Global IID params (used when world_configs is None)
+    beta_scale:          float       = 1.0
+    initial_seeds:       int         = 3
     # End condition (applied per silo; default: run until epidemic extinct)
     end_condition:       str         = "extinction"
     end_condition_param: Optional[int] = None
@@ -185,6 +189,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             bscale         = wc.beta_scale
             s_offset       = wc.seed_offset
             rev_incub_icd  = wc.reveal_incubating_icd
+            n_seeds        = wc.initial_seeds
         else:
             unknown = [p for p in cfg.progressions if p not in PROGRESSION_STRATEGIES]
             if unknown:
@@ -197,9 +202,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             end_cond      = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
             n_agents      = cfg.num_agents
             bg_rate       = 0.025
-            bscale        = 1.0
+            bscale        = cfg.beta_scale
             s_offset      = 0
             rev_incub_icd = True
+            n_seeds       = cfg.initial_seeds
 
         return WorldEngine(
             num_agents             = n_agents,
@@ -210,6 +216,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             background_visit_rate  = bg_rate,
             beta_scale             = bscale,
             reveal_incubating_icd  = rev_incub_icd,
+            initial_seeds          = n_seeds,
         )
 
     # ── Create silos ──────────────────────────────────────────────────────────
