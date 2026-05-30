@@ -28,3 +28,8 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# Generated outputs
+reports/
+wandb/
+mnt/
