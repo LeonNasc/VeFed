@@ -145,7 +145,9 @@ class WorldFLClient:
     @property
     def local_model(self):
         if self._local_model is None:
-            self._local_model = build_model(self.lora_config).to(self.device)
+            # Keep on CPU to avoid VRAM pressure — with N silos there would be
+            # 2N DistilBERT instances on GPU; local shadow model trains on CPU.
+            self._local_model = build_model(self.lora_config).cpu()
         return self._local_model
 
     # ── Simulation ─────────────────────────────────────────────────────────────
@@ -184,8 +186,13 @@ class WorldFLClient:
             labels.append(label)
         return texts, labels
 
+    @staticmethod
+    def _model_device(model):
+        """Return the device of the first model parameter."""
+        return next(model.parameters()).device
+
     def _train_model(self, model, events: list) -> tuple[int, list[float]]:
-        """Fine-tune a LoRA model on events. Returns (num_examples, epoch_losses)."""
+        """Fine-tune a LoRA model on events. Uses the model's own device."""
         import torch
         from torch.optim import AdamW
         from torch.utils.data import DataLoader, TensorDataset
@@ -195,6 +202,7 @@ class WorldFLClient:
         if not texts:
             return 0, []
 
+        dev = self._model_device(model)
         tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
         enc = tokenizer(
             texts, padding=True, truncation=True,
@@ -212,9 +220,9 @@ class WorldFLClient:
         for _ in range(self.local_epochs):
             batch_losses = []
             for input_ids, attn_mask, batch_labels in loader:
-                input_ids    = input_ids.to(self.device)
-                attn_mask    = attn_mask.to(self.device)
-                batch_labels = batch_labels.to(self.device)
+                input_ids    = input_ids.to(dev)
+                attn_mask    = attn_mask.to(dev)
+                batch_labels = batch_labels.to(dev)
                 optimizer.zero_grad()
                 out = model(input_ids=input_ids, attention_mask=attn_mask, labels=batch_labels)
                 out.loss.backward()
@@ -270,13 +278,14 @@ class WorldFLClient:
             texts, padding=True, truncation=True,
             max_length=128, return_tensors="pt",
         )
-        label_t = torch.tensor(labels, dtype=torch.long).to(self.device)
+        dev = self._model_device(model)
+        label_t = torch.tensor(labels, dtype=torch.long).to(dev)
 
         model.eval()
         with torch.no_grad():
             out = model(
-                input_ids=enc["input_ids"].to(self.device),
-                attention_mask=enc["attention_mask"].to(self.device),
+                input_ids=enc["input_ids"].to(dev),
+                attention_mask=enc["attention_mask"].to(dev),
                 labels=label_t,
             )
 

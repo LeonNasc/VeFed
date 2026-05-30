@@ -282,6 +282,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
     _report    = RunReport(cfg, _run_id)
     _report_path = Path(f"reports/run_{_run_id}.html")
 
+    # ── Embedding tracker ─────────────────────────────────────────────────────
+    from viz.embedding_tracker import EmbeddingTracker
+    print("  [embed] Building benchmark probe set…")
+    _embed_dir = Path(f"viz_output/embeddings/run_{_run_id}")
+    _tracker = EmbeddingTracker(_embed_dir, cfg.lora_config())
+    print(f"  [embed] {len(_tracker.probe_events)} probe events ready "
+          f"({len(set(e.ground_truth for e in _tracker.probe_events))} unique labels)\n")
+
     # ── Initialise global weights from silo 0 ─────────────────────────────────
     global_weights = silos[0].get_weights()
 
@@ -346,9 +354,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             global_weights = _fedavg(round_weights, round_nexamples)
         log["aggregated/silos_trained"] = sum(round_trained)
 
+        # ── Embedding snapshot (global + per-silo fed + per-silo local) ───────
+        _tracker.snapshot(round_num, global_weights, silos)
+
         # ── Federated few-shot update — refresh Ollama doctor's example bank ──
-        # Harvest correct conversations from all silos this round and update
-        # the shared Ollama client so the doctor improves each round.
         if ollama_active and ollama_client is not None:
             round_events = [ev for silo in silos for ev in silo.last_round_events]
             ollama_client.update_examples(round_events)
@@ -390,6 +399,12 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
     run.finish()
     _report.write(_report_path)
+
+    # ── Save embedding evolution plots ────────────────────────────────────────
+    print("  [embed] Generating evolution plots…")
+    embed_plots = _tracker.save_plots()
+    for p in embed_plots:
+        print(f"  [embed] {p.resolve()}")
 
     run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
     print(f"\nTraining complete. W&B: {run_ref}")

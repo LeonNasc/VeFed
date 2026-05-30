@@ -337,6 +337,45 @@ class DeadlyProgression(DiseaseProgressionStrategy):
         )
 
 
+# ─── Benchmark probe disease ──────────────────────────────────────────────────
+
+class BenchmarkFeverProgression(DiseaseProgressionStrategy):
+    """
+    Synthetic viral haemorrhagic-like fever — used only for embedding probes.
+    NOT added to PROGRESSION_STRATEGIES (not circulated in simulations).
+
+    Design goals:
+    - Wide severity variance (SD 0.25) → all three management tiers naturally represented
+    - Distinctive vital signature (massively elevated CRP, coagulopathy proxy, SpO2 drop)
+      so the model *can* separate it from existing diseases if it learns correctly
+    - ICD A99.0: synthetic code, clearly marks probe events in scatter plots
+    """
+    name        = "Benchmark Fever"
+    icd_code    = "A99.0"
+    description = "Synthetic benchmark — wide severity range, distinctive haemorrhagic vital profile."
+
+    def sample_trajectory(self, rng: random.Random) -> DiseaseTrajectory:
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.60, 0.25, 0.12, 0.96),
+            rise_days             = self._sample(rng, 4.0,  0.8,  2.0,  7.0),
+            decay_rate            = self._sample(rng, 0.06, 0.02, 0.02, 0.12),
+            symptom_sensitivity   = self._sample(rng, 5.0,  0.8,  2.5,  8.0),
+            severity_floor_weight = 0.30,
+            disease_name          = self.name,
+            icd_code              = self.icd_code,
+            incubation_days       = 3,
+            vital_slopes = {
+                "CRP":    4.5,   # massively elevated — hallmark of this disease
+                "WBC":    3.0,   # leukocytosis
+                "temp":   2.5,   # high sustained fever
+                "HR":     1.8,   # tachycardia
+                "SpO2":   1.5,   # moderate hypoxia
+                "BP_sys": 1.8,   # hypotension at severe stages
+                "RR":     1.4,
+            },
+        )
+
+
 # ─── MIMIC progression ────────────────────────────────────────────────────────
 
 class MimicProgression(DiseaseProgressionStrategy):
