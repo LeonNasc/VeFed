@@ -335,6 +335,11 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
         agg_loss = agg_acc = agg_n = agg_trained = 0.0
 
+        # Collect weights for embedding snapshot while model is still built,
+        # before release_model(). This avoids rebuilding N models during snapshot.
+        snap_fed_weights:   list = []
+        snap_local_weights: list = []
+
         for i, silo in enumerate(silos):
             if silo.world.is_done:
                 # Done silo: conditionally accept global model, then re-upload weights
@@ -346,8 +351,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                 m = silo.run_round()
                 fedavg_n = m.get("num_examples", 0)
 
-            round_weights.append(silo.get_weights())
-            silo.release_model()   # free VRAM immediately — only one silo active at a time
+            fed_w   = silo.get_weights()
+            from fl.lora import get_lora_weights as _glw
+            local_w = _glw(silo.local_model)
+            snap_fed_weights.append(fed_w)
+            snap_local_weights.append(local_w)
+
+            round_weights.append(fed_w)
+            silo.release_model()   # free VRAM — model no longer needed this round
             n         = m.get("num_examples", 0)
             did_train = bool(m.get("trained", 0))
             round_nexamples.append(fedavg_n)
@@ -386,8 +397,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             global_weights = _fedavg(round_weights, round_nexamples)
         log["aggregated/silos_trained"] = sum(round_trained)
 
-        # ── Embedding snapshot (global + per-silo fed + per-silo local) ───────
-        _tracker.snapshot(round_num, global_weights, silos)
+        # ── Embedding snapshot — weights already collected, no model rebuilds ──
+        _tracker.snapshot(round_num, global_weights,
+                          silo_fed_weights=snap_fed_weights,
+                          silo_local_weights=snap_local_weights)
 
         # ── Federated few-shot update — refresh Ollama doctor's example bank ──
         if ollama_active and ollama_client is not None:

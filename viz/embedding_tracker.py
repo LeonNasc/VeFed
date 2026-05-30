@@ -209,22 +209,28 @@ class EmbeddingTracker:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def snapshot(self, round_num: int, global_weights: list, silos: list,
+    def snapshot(self, round_num: int, global_weights: list,
+                 silo_fed_weights: list | None = None,
+                 silo_local_weights: list | None = None,
                  extra_weights: dict | None = None) -> None:
         """
         Extract and save CLS embeddings + logits for all models.
 
-        Saves per-round .npz files with keys: cls (N,H), logits (N,C), labels (N,).
-        In-memory _snapshots stores {"cls": ..., "logits": ...} per model.
+        Accepts pre-computed weight lists so the caller controls when models are
+        built and released.  Never calls silo.model itself — no GPU rebuilds here.
 
         Parameters
         ----------
+        global_weights : list[np.ndarray]
+            FedAvg global model adapter weights.
+        silo_fed_weights : list[list[np.ndarray]]
+            Per-silo federated weights, collected during the round loop while
+            models are already built (before release_model()).
+        silo_local_weights : list[list[np.ndarray]]
+            Per-silo local-only shadow model weights (same ordering as fed).
         extra_weights : dict[str, list[np.ndarray]] | None
-            Additional named models to snapshot alongside the federated ones.
-            Key becomes the model name in the .npz and plot (e.g. "centralized").
+            Additional named models, e.g. {"centralized": weights}.
         """
-        from fl.lora import get_lora_weights
-
         snap: dict[str, dict] = {}
 
         def _record(name, weights):
@@ -232,9 +238,13 @@ class EmbeddingTracker:
             snap[name] = {"cls": cls, "logits": logits}
 
         _record("global", global_weights)
-        for i, silo in enumerate(silos):
-            _record(f"silo_{i}_fed",   silo.get_weights())
-            _record(f"silo_{i}_local", get_lora_weights(silo.local_model))
+
+        if silo_fed_weights:
+            for i, fw in enumerate(silo_fed_weights):
+                _record(f"silo_{i}_fed", fw)
+        if silo_local_weights:
+            for i, lw in enumerate(silo_local_weights):
+                _record(f"silo_{i}_local", lw)
 
         if extra_weights:
             for name, weights in extra_weights.items():
