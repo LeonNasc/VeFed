@@ -200,11 +200,13 @@ class WorldEngine:
                  progression_strategies: list[DiseaseProgressionStrategy] | None = None,
                  end_condition: EndCondition | None = None,
                  background_visit_rate: float = 0.025,
-                 beta_scale: float = 1.0):
+                 beta_scale: float = 1.0,
+                 reveal_incubating_icd: bool = True):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
         self._beta_scale: float = beta_scale
+        self.reveal_incubating_icd: bool = reveal_incubating_icd
 
         # Build the progression list (multi-disease when progression_strategies provided)
         if progression_strategies:
@@ -388,7 +390,11 @@ class WorldEngine:
         cases = []
         for agent in self.agents:
             if agent.should_seek_care():
-                cases.append(agent.build_diagnostic_event())
+                ev = agent.build_diagnostic_event()
+                # Q26: mask real ICD for incubating patients when reveal_incubating_icd=False
+                if not self.reveal_incubating_icd and ev.severity == 0.0 and ev.days_infected > 0:
+                    ev.ground_truth = "unknown / home rest"
+                cases.append(ev)
         return cases
 
     # ── Extension point: Diagnostic / FL hooks ───────────────────────────────

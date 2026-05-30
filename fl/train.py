@@ -74,6 +74,7 @@ class WorldConfig:
     end_condition:         str         = "extinction"
     end_condition_param:   Optional[int] = None
     seed_offset:           int         = 0
+    reveal_incubating_icd: bool        = True
 
 
 # ── Config dataclass ──────────────────────────────────────────────────────────
@@ -176,13 +177,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
         wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
 
         if wc is not None:
-            progs     = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
-            strategy  = STRATEGIES.get(wc.disease_strategy)
-            end_cond  = end_condition_from_config(wc.end_condition, wc.end_condition_param)
-            n_agents  = wc.num_agents
-            bg_rate   = wc.background_visit_rate
-            bscale    = wc.beta_scale
-            s_offset  = wc.seed_offset
+            progs          = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy       = STRATEGIES.get(wc.disease_strategy)
+            end_cond       = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents       = wc.num_agents
+            bg_rate        = wc.background_visit_rate
+            bscale         = wc.beta_scale
+            s_offset       = wc.seed_offset
+            rev_incub_icd  = wc.reveal_incubating_icd
         else:
             unknown = [p for p in cfg.progressions if p not in PROGRESSION_STRATEGIES]
             if unknown:
@@ -190,13 +192,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                     f"Unknown progression(s): {unknown}. "
                     f"Available: {list(PROGRESSION_STRATEGIES)}"
                 )
-            progs    = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
-            strategy = STRATEGIES.get(cfg.disease_strategy)
-            end_cond = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
-            n_agents = cfg.num_agents
-            bg_rate  = 0.025
-            bscale   = 1.0
-            s_offset = 0
+            progs         = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy      = STRATEGIES.get(cfg.disease_strategy)
+            end_cond      = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents      = cfg.num_agents
+            bg_rate       = 0.025
+            bscale        = 1.0
+            s_offset      = 0
+            rev_incub_icd = True
 
         return WorldEngine(
             num_agents             = n_agents,
@@ -206,6 +209,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             end_condition          = end_cond,
             background_visit_rate  = bg_rate,
             beta_scale             = bscale,
+            reveal_incubating_icd  = rev_incub_icd,
         )
 
     # ── Create silos ──────────────────────────────────────────────────────────
@@ -330,7 +334,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
                 agg_trained += m.get("trained_on", 0)
                 for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                             "combined_acc", "triage_macro_f1", "danger_rate",
-                            "avg_turns", "first_turn_rate", "action_accuracy"):
+                            "avg_turns", "first_turn_rate", "action_accuracy",
+                            "fp_escalation_rate", "local_triage_acc", "fl_gain"):
                     v = m.get(sub, float("nan"))
                     if v == v:
                         agg_key = f"aggregated/{sub}"
@@ -367,7 +372,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
             log["aggregated/num_trained"]  = int(agg_trained)
             for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                         "combined_acc", "triage_macro_f1", "danger_rate",
-                        "avg_turns", "first_turn_rate", "action_accuracy"):
+                        "avg_turns", "first_turn_rate", "action_accuracy",
+                        "fp_escalation_rate", "local_triage_acc", "fl_gain"):
                 k = f"aggregated/{sub}"
                 if k in log:
                     log[k] /= agg_n
@@ -395,14 +401,17 @@ def run_federated_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[W
 
 def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> None:
     nan = float("nan")
-    agg_loss    = log.get("aggregated/loss",            nan)
-    triage      = log.get("aggregated/triage_acc",      nan)
-    diag        = log.get("aggregated/diag_acc",        nan)
-    macro_f1    = log.get("aggregated/triage_macro_f1", nan)
-    danger      = log.get("aggregated/danger_rate",     nan)
-    avg_turns   = log.get("aggregated/avg_turns",       nan)
-    act_acc     = log.get("aggregated/action_accuracy", nan)
-    n_trained   = int(log.get("aggregated/num_trained", 0))
+    agg_loss    = log.get("aggregated/loss",              nan)
+    triage      = log.get("aggregated/triage_acc",        nan)
+    local_tr    = log.get("aggregated/local_triage_acc",  nan)
+    fl_gain     = log.get("aggregated/fl_gain",           nan)
+    diag        = log.get("aggregated/diag_acc",          nan)
+    macro_f1    = log.get("aggregated/triage_macro_f1",   nan)
+    danger      = log.get("aggregated/danger_rate",       nan)
+    fp_esc      = log.get("aggregated/fp_escalation_rate",nan)
+    avg_turns   = log.get("aggregated/avg_turns",         nan)
+    act_acc     = log.get("aggregated/action_accuracy",   nan)
+    n_trained   = int(log.get("aggregated/num_trained",   0))
     silos_tr    = int(log.get("aggregated/silos_trained", 0))
 
     def _fmt(v: float, dec: int = 2) -> str:
@@ -425,8 +434,9 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
     print(
         f"  Round {round_num:>3}/~{max_rounds} | "
         f"loss={_fmt(agg_loss,4)} "
-        f"triage={_fmt(triage)} diag={_fmt(diag)} "
-        f"f1={_fmt(macro_f1)} danger={_fmt(danger)} "
+        f"fed={_fmt(triage)} local={_fmt(local_tr)} +Δ={_fmt(fl_gain,3)} "
+        f"diag={_fmt(diag)} f1={_fmt(macro_f1)} "
+        f"danger={_fmt(danger)} fp_esc={_fmt(fp_esc)} "
         f"dr_turns={_fmt(avg_turns,1)} dr_act={_fmt(act_acc)} "
         f"n={n_trained:>4} silos={silos_tr} | "
         f"{' '.join(silo_parts) or '—'} | "

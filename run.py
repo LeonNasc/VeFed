@@ -58,7 +58,8 @@ class RunConfig:
     wandb_offline:      bool       = False
     use_ollama:         bool       = True
     # Non-IID: list of WorldConfig dicts (set by presets; None = all silos identical)
-    world_configs:      Optional[list] = None
+    world_configs:          Optional[list] = None
+    reveal_incubating_icd:  bool           = True
 
     def __post_init__(self):
         if self.progressions is None:

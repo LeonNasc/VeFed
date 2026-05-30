@@ -125,20 +125,28 @@ class WorldFLClient:
             base_cfg = replace(base_cfg, num_labels=len(self._label2id))
         self.lora_config = base_cfg
 
-        self._model = None  # lazy-built on first use
+        self._model       = None  # lazy-built on first use
+        self._local_model = None  # shadow local-only model (never receives global weights)
         self.last_round_events: list = []   # events from the most recent round
 
         # Frozen-silo state — populated when world.is_done fires
-        self._frozen_weights:    Optional[list] = None
-        self._frozen_eval_batch: list           = []
-        self._frozen_triage_acc: float          = 0.0
-        self._frozen_n:          int            = 0   # FedAvg weight for done silo
+        self._frozen_weights:          Optional[list] = None
+        self._frozen_eval_batch:       list           = []
+        self._frozen_triage_acc:       float          = 0.0
+        self._frozen_local_triage_acc: float          = 0.0
+        self._frozen_n:                int            = 0   # FedAvg weight for done silo
 
     @property
     def model(self):
         if self._model is None:
             self._model = build_model(self.lora_config).to(self.device)
         return self._model
+
+    @property
+    def local_model(self):
+        if self._local_model is None:
+            self._local_model = build_model(self.lora_config).to(self.device)
+        return self._local_model
 
     # ── Simulation ─────────────────────────────────────────────────────────────
 
@@ -176,16 +184,8 @@ class WorldFLClient:
             labels.append(label)
         return texts, labels
 
-    def train_on_events(self, events: list) -> tuple[int, list[float]]:
-        """
-        Fine-tune LoRA adapter on collected events.
-
-        Returns
-        -------
-        (num_examples, epoch_losses)
-            num_examples : training pairs used
-            epoch_losses : mean loss per epoch (empty list if no data)
-        """
+    def _train_model(self, model, events: list) -> tuple[int, list[float]]:
+        """Fine-tune a LoRA model on events. Returns (num_examples, epoch_losses)."""
         import torch
         from torch.optim import AdamW
         from torch.utils.data import DataLoader, TensorDataset
@@ -201,17 +201,13 @@ class WorldFLClient:
             max_length=128, return_tensors="pt",
         )
         label_t = torch.tensor(labels, dtype=torch.long)
-
         dataset = TensorDataset(enc["input_ids"], enc["attention_mask"], label_t)
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        loader  = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        model = self.model   # already on self.device
         model.train()
         optimizer = AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=self.lr,
+            [p for p in model.parameters() if p.requires_grad], lr=self.lr
         )
-
         epoch_losses: list[float] = []
         for _ in range(self.local_epochs):
             batch_losses = []
@@ -220,17 +216,17 @@ class WorldFLClient:
                 attn_mask    = attn_mask.to(self.device)
                 batch_labels = batch_labels.to(self.device)
                 optimizer.zero_grad()
-                out = model(
-                    input_ids=input_ids,
-                    attention_mask=attn_mask,
-                    labels=batch_labels,
-                )
+                out = model(input_ids=input_ids, attention_mask=attn_mask, labels=batch_labels)
                 out.loss.backward()
                 optimizer.step()
                 batch_losses.append(out.loss.detach().item())
             epoch_losses.append(sum(batch_losses) / len(batch_losses))
 
         return len(texts), epoch_losses
+
+    def train_on_events(self, events: list) -> tuple[int, list[float]]:
+        """Fine-tune the federated LoRA model. Returns (num_examples, epoch_losses)."""
+        return self._train_model(self.model, events)
 
     # ── Weight I/O ─────────────────────────────────────────────────────────────
 
@@ -242,28 +238,21 @@ class WorldFLClient:
 
     # ── Evaluation ─────────────────────────────────────────────────────────────
 
-    def evaluate(self, events: Optional[list] = None) -> dict:
+    def _evaluate_model(self, model, events: list) -> dict:
         """
-        Evaluate the current LoRA model on events (call BEFORE training them).
+        Core evaluation logic for any LoRA model on a list of DiagnosticEvents.
 
         Returns
         -------
-        triage_acc      — % correct management tier (home rest / treat / hospitalise)
-        diag_acc        — % correct ICD 3-char category (disease identity)
-        icd_exact_acc   — % exact ICD subcategory match (harder; analysis only)
-        combined_acc    — triage AND diag both correct
-        triage_macro_f1 — macro-averaged F1 across the 3 triage tiers
-        triage_f1       — {tier: {precision, recall, f1}} per triage class
-        danger_rate     — P(predicted=home_rest | truth=hospitalise): the most
-                          clinically harmful error (under-triage)
-        per_class       — {label: acc} for each (ICD/mgmt) combination seen
-        loss, num_examples
+        triage_acc, diag_acc, icd_exact_acc, combined_acc,
+        triage_macro_f1, triage_f1, danger_rate, per_class,
+        avg_turns, first_turn_rate, action_accuracy,
+        fp_escalation_rate, loss, num_examples
         """
         import torch
         from collections import defaultdict
         from transformers import AutoTokenizer
 
-        events = events or self.world.clinic_queue.processed
         texts, labels = self._build_dataset(events)
         if not texts:
             return {
@@ -272,6 +261,8 @@ class WorldFLClient:
                 "icd_exact_acc": float("nan"), "combined_acc": float("nan"),
                 "triage_macro_f1": float("nan"), "triage_f1": {},
                 "danger_rate": float("nan"), "per_class": {},
+                "avg_turns": float("nan"), "first_turn_rate": float("nan"),
+                "action_accuracy": float("nan"), "fp_escalation_rate": float("nan"),
             }
 
         tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
@@ -281,9 +272,9 @@ class WorldFLClient:
         )
         label_t = torch.tensor(labels, dtype=torch.long).to(self.device)
 
-        self.model.eval()
+        model.eval()
         with torch.no_grad():
-            out = self.model(
+            out = model(
                 input_ids=enc["input_ids"].to(self.device),
                 attention_mask=enc["attention_mask"].to(self.device),
                 labels=label_t,
@@ -296,11 +287,10 @@ class WorldFLClient:
         icd_exact = icd_cat = mgmt_ok = combined = 0
         per_class_correct: dict[str, int] = defaultdict(int)
         per_class_total:   dict[str, int] = defaultdict(int)
-        # Per-triage confusion for F1 and danger rate
         triage_tp: dict[str, int] = defaultdict(int)
         triage_fp: dict[str, int] = defaultdict(int)
         triage_fn: dict[str, int] = defaultdict(int)
-        danger = 0   # predicted home_rest when truth is hospitalise
+        danger = 0
 
         for pred_idx, true_idx in zip(preds, true_idxs):
             pred_lbl = self._id2label[pred_idx]
@@ -328,7 +318,6 @@ class WorldFLClient:
                 if true_mgmt == "hospitalise" and pred_mgmt == "home rest":
                     danger += 1
 
-        # Per-triage F1
         tiers = ("home rest", "treat", "hospitalise")
         triage_f1: dict[str, dict] = {}
         for tier in tiers:
@@ -338,57 +327,64 @@ class WorldFLClient:
             f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
             triage_f1[tier] = {"precision": prec, "recall": rec, "f1": f1}
         macro_f1 = sum(v["f1"] for v in triage_f1.values()) / len(tiers)
-
         n_hosp_true = triage_tp["hospitalise"] + triage_fn["hospitalise"]
 
-        # Doctor LLM performance metrics (only meaningful when Ollama is active)
-        gt_to_action = {
-            "home rest":   "RECOVER",
-            "treat":       "RESOLVE",
-            "hospitalise": "HOSPITALISE",
-        }
+        # Doctor LLM metrics (zero when Ollama not active)
+        gt_to_action = {"home rest": "RECOVER", "treat": "RESOLVE", "hospitalise": "HOSPITALISE"}
         turns_list = [ev.num_turns for ev in events if ev.num_turns > 0]
-        action_correct = 0
-        action_total   = 0
+        action_correct = action_total = 0
         for ev in events:
             if ev.num_turns == 0 or not ev.ground_truth or ev.action is None:
                 continue
-            gt_mgmt = ev.ground_truth.rsplit(" / ", 1)[-1]
-            expected = gt_to_action.get(gt_mgmt)
+            expected = gt_to_action.get(ev.ground_truth.rsplit(" / ", 1)[-1])
             if expected is not None:
                 action_total   += 1
                 action_correct += int(ev.action.name == expected)
 
         avg_turns       = sum(turns_list) / len(turns_list) if turns_list else float("nan")
-        # Ideal flow = question → vitals → decision = exactly 3 LLM calls
         first_turn_rate = sum(1 for t in turns_list if t <= 3) / len(turns_list) if turns_list else float("nan")
         action_accuracy = action_correct / action_total if action_total > 0 else float("nan")
 
+        # Q24: false-positive escalation rate — noise cases that doctor escalated
+        noise_total = noise_escalated = 0
+        for ev in events:
+            is_noise = ev.is_background or (ev.severity == 0.0 and ev.days_infected > 0)
+            if not is_noise or ev.action is None or ev.num_turns == 0:
+                continue
+            noise_total += 1
+            if ev.action.name != "RECOVER":
+                noise_escalated += 1
+        fp_escalation_rate = noise_escalated / noise_total if noise_total > 0 else float("nan")
+
         return {
-            "loss":             float(out.loss),
-            "num_examples":     n,
-            "triage_acc":       mgmt_ok   / n,
-            "diag_acc":         icd_cat   / n,
-            "icd_exact_acc":    icd_exact / n,
-            "combined_acc":     combined  / n,
-            "triage_macro_f1":  macro_f1,
-            "triage_f1":        triage_f1,
-            "danger_rate":      danger / n_hosp_true if n_hosp_true > 0 else float("nan"),
-            "per_class": {
-                k: per_class_correct[k] / per_class_total[k]
-                for k in per_class_total
-            },
-            "avg_turns":        avg_turns,
-            "first_turn_rate":  first_turn_rate,
-            "action_accuracy":  action_accuracy,
+            "loss":               float(out.loss),
+            "num_examples":       n,
+            "triage_acc":         mgmt_ok   / n,
+            "diag_acc":           icd_cat   / n,
+            "icd_exact_acc":      icd_exact / n,
+            "combined_acc":       combined  / n,
+            "triage_macro_f1":    macro_f1,
+            "triage_f1":          triage_f1,
+            "danger_rate":        danger / n_hosp_true if n_hosp_true > 0 else float("nan"),
+            "per_class":          {k: per_class_correct[k] / per_class_total[k] for k in per_class_total},
+            "avg_turns":          avg_turns,
+            "first_turn_rate":    first_turn_rate,
+            "action_accuracy":    action_accuracy,
+            "fp_escalation_rate": fp_escalation_rate,
         }
+
+    def evaluate(self, events: Optional[list] = None) -> dict:
+        """Evaluate the federated (global) LoRA model on events."""
+        events = events or self.world.clinic_queue.processed
+        return self._evaluate_model(self.model, events)
 
     # ── Memory management ──────────────────────────────────────────────────────
 
     def release_model(self) -> None:
-        """Free the LoRA model from memory. Rebuilt automatically on next use."""
+        """Free both LoRA models from memory. Rebuilt automatically on next use."""
         import gc
-        self._model = None
+        self._model       = None
+        self._local_model = None
         gc.collect()
         try:
             import torch
@@ -434,7 +430,7 @@ class WorldFLClient:
     def _run_frozen_round(self) -> dict:
         """
         Called when world.is_done. No simulation, no training.
-        On first call: snapshots weights + eval batch.
+        On first call: snapshots weights + eval batch for both models.
         Subsequent calls: returns frozen metrics immediately.
         """
         if self._frozen_weights is None:
@@ -443,49 +439,50 @@ class WorldFLClient:
             if self._frozen_eval_batch:
                 m = self.evaluate(self._frozen_eval_batch)
                 self._frozen_triage_acc = m.get("triage_acc", 0.0)
-            # FedAvg weight: max of actual batch size and min_events_to_train
+                lm = self._evaluate_model(self.local_model, self._frozen_eval_batch)
+                self._frozen_local_triage_acc = lm.get("triage_acc", 0.0)
             self._frozen_n = max(len(self._frozen_eval_batch), self.min_events_to_train)
 
+        nan = float("nan")
         sir = self.world.sir_model
+        local_acc = self._frozen_local_triage_acc
+        fed_acc   = self._frozen_triage_acc
+        fl_gain   = fed_acc - local_acc if (fed_acc == fed_acc and local_acc == local_acc) else nan
         return {
-            "loss":             float("nan"),
-            "num_examples":     0,
-            "triage_acc":       self._frozen_triage_acc,
-            "diag_acc":         float("nan"),
-            "icd_exact_acc":    float("nan"),
-            "combined_acc":     float("nan"),
-            "triage_macro_f1":  float("nan"),
-            "triage_f1":        {},
-            "danger_rate":      float("nan"),
-            "per_class":        {},
-            "trained_on":       0,
-            "trained":          0,
-            "num_events":       0,
-            "epoch_losses":     [],
-            "sir_s":            sir.S,
-            "sir_i":            sir.I,
-            "sir_r":            sir.R,
+            "loss":               nan,
+            "num_examples":       0,
+            "triage_acc":         fed_acc,
+            "diag_acc":           nan,
+            "icd_exact_acc":      nan,
+            "combined_acc":       nan,
+            "triage_macro_f1":    nan,
+            "triage_f1":          {},
+            "danger_rate":        nan,
+            "per_class":          {},
+            "avg_turns":          nan,
+            "first_turn_rate":    nan,
+            "action_accuracy":    nan,
+            "fp_escalation_rate": nan,
+            "trained_on":         0,
+            "trained":            0,
+            "num_events":         0,
+            "epoch_losses":       [],
+            "sir_s":              sir.S,
+            "sir_i":              sir.I,
+            "sir_r":              sir.R,
+            "local_triage_acc":   local_acc,
+            "fl_gain":            fl_gain,
         }
 
     # ── Convenience ────────────────────────────────────────────────────────────
 
     def run_round(self) -> dict:
         """
-        One complete FL round: simulate → (optionally train) → evaluate → metrics.
+        One complete FL round: simulate → evaluate (global + local) → train both → metrics.
 
-        LoRA training is skipped when the round yields fewer than
-        `min_events_to_train` events — avoids noisy gradient updates on
-        near-empty batches. The `trained` key signals to the orchestrator
-        whether to include this silo's weights in FedAvg.
-
-        Returned dict keys
-        ------------------
-        loss, accuracy, num_examples  — eval metrics (NaN / 0 if skipped)
-        trained_on                    — examples used for training (0 if skipped)
-        trained                       — 1 if LoRA was updated, 0 if skipped
-        num_events                    — raw events collected this round
-        epoch_losses                  — per-epoch mean training loss ([] if skipped)
-        sir_s, sir_i, sir_r           — SIR state after simulation
+        Evaluate-before-train gives generalisation accuracy on unseen cases.
+        The local shadow model trains on the same events but never receives global
+        weights — its triage_acc is the local-only baseline for measuring FL gain.
         """
         if self.world.is_done:
             return self._run_frozen_round()
@@ -495,25 +492,34 @@ class WorldFLClient:
         num_events = len(events)
         sir        = self.world.sir_model
 
-        # Evaluate with the current (global) weights BEFORE training.
-        # This gives generalisation accuracy on unseen cases — the model
-        # hasn't seen this round's events during any prior training step.
+        # Evaluate global (federated) model BEFORE training
         metrics = self.evaluate(events)
+
+        # Evaluate local shadow model BEFORE its training (fair comparison)
+        local_metrics = self._evaluate_model(self.local_model, events)
+        local_triage_acc = local_metrics.get("triage_acc", float("nan"))
 
         if num_events >= self.min_events_to_train:
             n, epoch_losses = self.train_on_events(events)
+            self._train_model(self.local_model, events)
             trained = 1
         else:
             n, epoch_losses = 0, []
             trained = 0
 
+        nan = float("nan")
+        fed_acc = metrics.get("triage_acc", nan)
+        fl_gain = fed_acc - local_triage_acc if (fed_acc == fed_acc and local_triage_acc == local_triage_acc) else nan
+
         metrics.update(
-            trained_on   = n,
-            trained      = trained,
-            num_events   = num_events,
-            epoch_losses = epoch_losses,
-            sir_s        = sir.S,
-            sir_i        = sir.I,
-            sir_r        = sir.R,
+            trained_on       = n,
+            trained          = trained,
+            num_events       = num_events,
+            epoch_losses     = epoch_losses,
+            sir_s            = sir.S,
+            sir_i            = sir.I,
+            sir_r            = sir.R,
+            local_triage_acc = local_triage_acc,
+            fl_gain          = fl_gain,
         )
         return metrics
