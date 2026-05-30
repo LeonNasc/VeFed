@@ -178,12 +178,13 @@ def _make_presets() -> dict[str, RunConfig]:
             num_silos           = 3,
             progressions        = ["Slow Burn", "Deadly"],
             disease_strategy    = "Standard Flu",
-            end_condition       = "extinction",
+            end_condition       = "horizon",
+            end_condition_param = 80,   # 80 sim-days → ~40 rounds at sim_days=2
             min_events_to_train = 5,
             local_epochs        = 3,
             sim_days            = 2,
-            beta_scale          = 0.6,
-            initial_seeds       = 8,
+            beta_scale          = 0.7,
+            initial_seeds       = 12,
         ),
     }
 
