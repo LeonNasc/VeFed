@@ -392,6 +392,37 @@ VITAL_ADDONS = {
 }
 
 
+BACKGROUND_PHRASES = {
+    Personality.STOIC: [
+        "I thought I'd stop in — not quite myself lately, probably nothing.",
+        "Nothing dramatic, just wanted a routine check.",
+        "Felt a bit run-down this week, might be stress.",
+        "Mild fatigue, thought it worth a quick check.",
+        "I'm mostly fine, just wanted to rule anything out.",
+    ],
+    Personality.NEUTRAL: [
+        "I've had a mild headache and some tiredness, nothing serious.",
+        "Just wanted to check in — I've felt slightly off for a few days.",
+        "I haven't been sleeping great and feel a bit run-down.",
+        "Nothing specific, just not feeling 100% lately.",
+        "I've had a vague sense of fatigue, thought I'd get it checked out.",
+        "I feel mostly fine, just a little less energetic than usual.",
+    ],
+    Personality.ANXIOUS: [
+        "I'm probably fine, but I've been feeling off and wanted to be sure.",
+        "I know it's likely nothing but I haven't felt right and it's worrying me.",
+        "I've been a bit tired and anxious about it, wanted to get checked.",
+        "I feel like something might be wrong — I can't put my finger on it.",
+        "I couldn't sleep worrying about how I've been feeling lately.",
+    ],
+}
+
+
+def background_opening(personality: Personality, rng: random.Random) -> str:
+    """Opening complaint for a healthy/worried-well visitor with no active disease."""
+    return rng.choice(BACKGROUND_PHRASES[personality])
+
+
 PERSONALITY_PREFIX = {
     Personality.STOIC: [
         "I suppose ", "If I'm honest, ", "Well, ", "To be fair, ", "",

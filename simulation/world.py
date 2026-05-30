@@ -196,7 +196,8 @@ class WorldEngine:
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
                  progression_strategy: DiseaseProgressionStrategy | None = None,
-                 end_condition: EndCondition | None = None):
+                 end_condition: EndCondition | None = None,
+                 background_visit_rate: float = 0.025):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
@@ -266,6 +267,9 @@ class WorldEngine:
         self._end_condition: EndCondition | None = end_condition
         self.is_done:      bool        = False
         self.stop_reason:  str | None  = None
+
+        # Noise parameters
+        self.background_visit_rate: float = background_visit_rate
 
         # FL extension points
         self.fl_round:     int         = 0
@@ -476,9 +480,19 @@ class WorldEngine:
                     f"Day {self.current_day}: Simulation ended — {self.stop_reason}"
                 )
 
-        # Collect symptomatic cases into queue
+        # Collect symptomatic + incubating cases into queue
         cases = self.collect_end_of_day_cases()
         for c in cases:
+            ag = self.agents_by_id.get(c.agent_id)
+            if ag:
+                c.conversation.append({
+                    'role':  'patient',
+                    'text':  self._generate_opening(ag),
+                })
+            self.clinic_queue.enqueue(c)
+
+        # Collect background healthy / worried-well visitors
+        for c in self._collect_background_cases():
             ag = self.agents_by_id.get(c.agent_id)
             if ag:
                 c.conversation.append({
@@ -506,11 +520,47 @@ class WorldEngine:
         if len(self.event_log) > 200:
             self.event_log = self.event_log[-200:]
 
+    def _collect_background_cases(self) -> list[DiagnosticEvent]:
+        """
+        Background healthy visitors: susceptible or recovered agents who show up
+        at the clinic without a real disease (worried-well, routine checks).
+        Rate is configurable via background_visit_rate (default 2.5 %/agent/day).
+        """
+        cases = []
+        for agent in self.agents:
+            if agent.status not in (HealthStatus.SUSCEPTIBLE, HealthStatus.RECOVERED):
+                continue
+            if agent.hospitalised or agent._care_cooldown > 0:
+                continue
+            if self._rng.random() < self.background_visit_rate:
+                ev = DiagnosticEvent(
+                    agent_id      = agent.id,
+                    severity      = 0.0,
+                    symptoms      = self._rng.uniform(0.0, 0.10),
+                    days_infected = 0,
+                    personality   = agent.personality,
+                    case_table    = None,
+                    ground_truth  = "Z00.0 / home rest",
+                    is_background = True,
+                )
+                cases.append(ev)
+        return cases
+
     def _generate_opening(self, agent) -> str:
         """
         Opening patient complaint for the clinic queue.
         Uses PatientLLMClient if wired; falls back to SymptomNarrator templates.
+        Healthy (susceptible/recovered) agents use background worried-well phrases.
         """
+        from simulation.symptom_language import background_opening
+        if agent.health_state.status in (HealthStatus.SUSCEPTIBLE, HealthStatus.RECOVERED):
+            patient_llm = getattr(self, "_patient_llm", None)
+            if patient_llm is not None:
+                try:
+                    return patient_llm.opening_statement(0.0, 0, agent.personality)
+                except Exception:
+                    pass
+            return background_opening(agent.personality, self._rng)
         patient_llm = getattr(self, "_patient_llm", None)
         if patient_llm is not None:
             try:
@@ -549,8 +599,15 @@ class WorldEngine:
             ag = self.agents_by_id.get(ev.agent_id)
             name = ag.name if ag else ev.agent_id
             ptrait = ev.personality.value if ev.personality else "?"
+            # Tag incubating (infected, severity==0) and background (healthy) visits
+            if ev.is_background:
+                tag = "[bg]   "
+            elif ev.severity == 0.0 and ev.days_infected > 0:
+                tag = "[incub]"
+            else:
+                tag = "       "
             self._log_file.write(
-                f"  clinic | {name:<20} [{ptrait:<7}] "
+                f"  clinic | {name:<20} [{ptrait:<7}] {tag} "
                 f"action={ev.action.value if ev.action else '?':<13} "
                 f"label={ev.oracle_label}\n"
             )

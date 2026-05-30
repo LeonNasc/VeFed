@@ -266,6 +266,7 @@ class DiagnosticEvent:
     case_table:     Optional[object] = None   # CaseTable instance
     diagnosis:      Optional[str] = None       # LLM's diagnosis text
     ground_truth:   Optional[str] = None       # Actual diagnosis for accuracy
+    is_background:  bool          = False      # True for worried-well / routine-check visitors
 
 
 # ─── Agent ────────────────────────────────────────────────────────────────────
@@ -325,6 +326,9 @@ class Agent:
             else:
                 # Synthetic trajectory: generate correlated vitals (90d covers Slow Burn / Deadly)
                 self._case_table = CaseTable(traj, self._rng, max_days=90)
+            # Reset cooldown: a newly infected agent should be able to seek care
+            # once symptoms emerge, even if they visited as worried-well recently.
+            self._care_cooldown = 0
             self.log.append("Contracted infection.")
             return True
         return False
@@ -349,6 +353,13 @@ class Agent:
         if hs.status == HealthStatus.INFECTED and hs.severity >= 0.70:
             return True
         if hs.status == HealthStatus.RECOVERING and hs.severity >= 0.30:
+            return True
+        # Incubation: agent feels vaguely off before symptoms manifest (8 % daily chance)
+        traj = hs._trajectory
+        if (hs.status == HealthStatus.INFECTED
+                and traj is not None
+                and 0 < hs.days_infected <= traj.incubation_days
+                and self._rng.random() < 0.08):
             return True
         return hs.symptoms >= self.severity_threshold
 
