@@ -143,6 +143,47 @@ def _make_presets() -> dict[str, RunConfig]:
             ],
         ),
 
+        # ── non-iid-10 ───────────────────────────────────────────────────────
+        # 10 silos with deterministic disease assignments across 3 archetypes.
+        # 4 Flu-dominant · 3 Corona-dominant · 3 Sepsis-dominant silos.
+        # Each silo sees only one disease — maximally non-IID deterministic.
+        # Designed to test whether clean convergence from the 3-silo non-iid
+        # run scales to 10 silos when disease assignment is unambiguous.
+        "non-iid-10": RunConfig(
+            mode                = "fl",
+            num_agents          = 80,
+            num_silos           = 10,
+            disease_strategy    = "Standard Flu",
+            end_condition       = "extinction",
+            min_events_to_train = 8,
+            local_epochs        = 10,
+            world_configs       = [
+                # Flu-dominant silos (0-3)
+                WorldConfig(num_agents=100, progressions=["Standard Flu"],
+                            disease_strategy="Standard Flu", beta_scale=1.2),
+                WorldConfig(num_agents=80,  progressions=["Standard Flu"],
+                            disease_strategy="Standard Flu", beta_scale=1.0),
+                WorldConfig(num_agents=120, progressions=["Standard Flu"],
+                            disease_strategy="Standard Flu", beta_scale=1.3),
+                WorldConfig(num_agents=60,  progressions=["Standard Flu"],
+                            disease_strategy="Standard Flu", beta_scale=0.9),
+                # Corona-dominant silos (4-6)
+                WorldConfig(num_agents=100, progressions=["Mild Corona"],
+                            disease_strategy="Standard Flu", beta_scale=1.1),
+                WorldConfig(num_agents=80,  progressions=["Mild Corona"],
+                            disease_strategy="Standard Flu", beta_scale=1.0),
+                WorldConfig(num_agents=60,  progressions=["Mild Corona"],
+                            disease_strategy="Standard Flu", beta_scale=0.8),
+                # Sepsis-dominant silos (7-9)
+                WorldConfig(num_agents=80,  progressions=["Slow Burn"],
+                            disease_strategy="Standard Flu", beta_scale=0.9),
+                WorldConfig(num_agents=50,  progressions=["Slow Burn"],
+                            disease_strategy="Standard Flu", beta_scale=0.7),
+                WorldConfig(num_agents=40,  progressions=["Slow Burn"],
+                            disease_strategy="Standard Flu", beta_scale=0.6),
+            ],
+        ),
+
         # ── hard-triage ───────────────────────────────────────────────────────
         # Slow Burn (sepsis-like plateau, muted symptoms) + Mild Corona (silent
         # hypoxia). Both are designed to fool symptom-based triage.
@@ -182,6 +223,7 @@ PRESET_DESCRIPTIONS = {
     "standard":     "3 silos · 60 agents · Flu + Corona · typical research run",
     "multi-disease":"5 silos · 100 agents · 3 archetypes · Dirichlet α=0.3 non-IID",
     "non-iid":      "3 silos · explicit disease profiles (Flu+Corona / Flu+Sepsis / Sepsis)",
+    "non-iid-10":   "10 silos · deterministic single-disease (4×Flu / 3×Corona / 3×Sepsis)",
     "hard-triage":  "3 silos · Slow Burn + Mild Corona · maximum triage difficulty",
     "long-burn":    "3 silos · 300 agents · Slow Burn + Corona · sim_days=2 · embedding studies",
 }
