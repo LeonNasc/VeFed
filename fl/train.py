@@ -516,6 +516,8 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
     local_tr    = log.get("aggregated/local_triage_acc",  nan)
     fl_gain     = log.get("aggregated/fl_gain",           nan)
     diag        = log.get("aggregated/diag_acc",          nan)
+    local_diag  = log.get("aggregated/local_diag_acc",    nan)
+    fl_diag_gain= log.get("aggregated/fl_diag_gain",      nan)
     macro_f1    = log.get("aggregated/triage_macro_f1",   nan)
     danger      = log.get("aggregated/danger_rate",       nan)
     fp_esc      = log.get("aggregated/fp_escalation_rate",nan)
@@ -544,8 +546,9 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
     print(
         f"  Round {round_num:>3}/~{max_rounds} | "
         f"loss={_fmt(agg_loss,4)} "
-        f"fed={_fmt(triage)} local={_fmt(local_tr)} +Δ={_fmt(fl_gain,3)} "
-        f"diag={_fmt(diag)} f1={_fmt(macro_f1)} "
+        f"tr={_fmt(triage)} local_tr={_fmt(local_tr)} +Δtr={_fmt(fl_gain,3)} "
+        f"diag={_fmt(diag)} local_dg={_fmt(local_diag)} +Δdg={_fmt(fl_diag_gain,3)} "
+        f"f1={_fmt(macro_f1)} "
         f"danger={_fmt(danger)} fp_esc={_fmt(fp_esc)} "
         f"dr_turns={_fmt(avg_turns,1)} dr_act={_fmt(act_acc)} "
         f"n={n_trained:>4} silos={silos_tr} | "
