@@ -262,6 +262,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     # ── Create silos ──────────────────────────────────────────────────────────
     silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
 
+    # ── Prototype libraries — one per silo ────────────────────────────────────
+    from fl.prototype_library import PrototypeLibrary, federate_libraries
+    proto_libs = [PrototypeLibrary(silo_id=i) for i in range(cfg.num_silos)]
+
     # ── Wire LLM clients — single shared Ollama server, all silos call it ────
     ollama_client  = None
     ollama_active  = False
@@ -284,11 +288,23 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         # Doctor LLM — multi-turn diagnostic model, receives formatted vitals
         ollama_client = OllamaDiagnosticClient(patient_llm=patient_llm)
         if ollama_client.health_check():
-            for silo in silos:
+            for i, silo in enumerate(silos):
                 q = silo.clinic_queue
+                # Each silo gets its own diagnostic fn capturing its proto lib
+                _lib = proto_libs[i]
                 silo.register_diagnostic_fn(
-                    lambda ev, _q=q: ollama_client.diagnose(ev, _queue=_q)
+                    lambda ev, _q=q, _lib=_lib: ollama_client.diagnose(
+                        ev, _queue=_q, _proto_lib=_lib)
                 )
+            # Attach the shared DistilBERT encoder for prototype retrieval
+            from transformers import AutoTokenizer
+            _enc_tokenizer = AutoTokenizer.from_pretrained(cfg.lora_config().model_name_or_path)
+            ollama_client.set_prototype_library(
+                library    = None,        # per-silo lib passed at diagnose() time
+                encoder_model = silos[0].learner.model,  # shared encoder (CPU)
+                tokenizer  = _enc_tokenizer,
+                k          = 3,
+            )
             ollama_active = True
             ollama_status = f"active ({ollama_client.model})"
         else:
@@ -417,6 +433,24 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             round_events = [ev for silo in silos for ev in silo.last_round_events]
             ollama_client.update_examples(round_events)
             log["aggregated/llm_few_shot_examples"] = ollama_client.num_examples()
+
+        # ── Prototype library — ingest + federate ─────────────────────────────
+        if ollama_active and ollama_client is not None and ollama_client._proto_encoder is not None:
+            enc_model, enc_tok = ollama_client._proto_encoder
+            enc_device = "cpu"
+            for i, silo in enumerate(silos):
+                added = proto_libs[i].add_from_events(
+                    silo.last_round_events, enc_model, enc_tok,
+                    round_num, device=enc_device,
+                )
+                log[f"silo_{i}/proto_added"] = added
+                log[f"silo_{i}/proto_size"]  = proto_libs[i].size()
+
+            # Federate: merge all silos' subsets into each silo's library
+            global_protos = federate_libraries(proto_libs, max_per_label=10)
+            for lib in proto_libs:
+                lib.merge(global_protos)
+            log["aggregated/proto_total"] = sum(l.size() for l in proto_libs)
 
         # ── Early exit if all silos finished ──────────────────────────────────
         if all(silo.is_done for silo in silos):

@@ -64,21 +64,29 @@ class OllamaDiagnosticClient:
 
     def __init__(self, model: str = MODEL, url: str = OLLAMA_URL,
                  timeout: int = TIMEOUT_SEC, patient_llm=None):
-        self.model        = model
-        self.url          = url
-        self.timeout      = timeout
-        self._patient_llm = patient_llm
-        self._examples:   list[dict] = []
+        self.model             = model
+        self.url               = url
+        self.timeout           = timeout
+        self._patient_llm      = patient_llm
+        self._examples:        list[dict] = []
+        self._proto_library    = None   # PrototypeLibrary | None
+        self._proto_encoder    = None   # (model, tokenizer) for embedding queries
+        self._proto_k:         int = 3  # prototypes retrieved per query
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    def diagnose(self, event: DiagnosticEvent, _queue=None) -> DiagnosticEvent:
+    def diagnose(self, event: DiagnosticEvent, _queue=None,
+                 _proto_lib=None) -> DiagnosticEvent:
         """
         Run the full patient-doctor pipeline for one DiagnosticEvent.
         event.conversation must already contain the opening patient statement.
         Raises OllamaUnavailableError if the doctor model is unreachable.
+
+        _proto_lib : PrototypeLibrary | None
+            Per-silo library passed at call time so the shared client can serve
+            all silos without holding per-silo state.
         """
-        messages     = self._build_initial_messages(event)
+        messages     = self._build_initial_messages(event, proto_lib=_proto_lib)
         vitals_taken = False
         turn         = 0
 
@@ -142,6 +150,16 @@ class OllamaDiagnosticClient:
 
         event.num_turns = turn
         return event
+
+    def set_prototype_library(self, library, encoder_model, tokenizer,
+                               k: int = 3) -> None:
+        """
+        Attach a PrototypeLibrary for embedding-based retrieval at inference time.
+        When set, retrieved prototypes are injected before the few-shot examples.
+        """
+        self._proto_library = library
+        self._proto_encoder = (encoder_model, tokenizer)
+        self._proto_k       = k
 
     def update_examples(self, events: list, max_per_tier: int = 2) -> None:
         """
@@ -246,14 +264,41 @@ class OllamaDiagnosticClient:
 
         return "[VITALS] " + " | ".join(parts)
 
-    def _build_initial_messages(self, event: DiagnosticEvent) -> list[dict]:
+    def _build_initial_messages(self, event: DiagnosticEvent,
+                                proto_lib=None) -> list[dict]:
         opening = next(
             (t["text"] for t in event.conversation if t["role"] == "patient"),
             "I am not feeling well.",
         )
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # Prototype retrieval — per-silo library passed at call time
+        library = proto_lib or self._proto_library
+        if library is not None and self._proto_encoder is not None:
+            try:
+                import torch
+                enc_model, tokenizer = self._proto_encoder
+                enc = tokenizer([opening], padding=True, truncation=True,
+                                max_length=128, return_tensors="pt")
+                enc_model.eval()
+                with torch.no_grad():
+                    out = enc_model(
+                        input_ids=enc["input_ids"],
+                        attention_mask=enc["attention_mask"],
+                        output_hidden_states=True,
+                    )
+                query_vec = out.hidden_states[-1][0, 0, :].cpu().numpy()
+                retrieved = library.retrieve(query_vec, k=self._proto_k)
+                if retrieved:
+                    from fl.prototype_library import prototypes_to_prompt_messages
+                    messages.extend(prototypes_to_prompt_messages(retrieved))
+            except Exception:
+                pass  # best-effort; never blocks diagnosis
+
+        # Conversation few-shot examples (appended after protos)
         for ex_messages in self._examples:
             messages.extend(ex_messages)
+
         messages.append({"role": "user", "content": opening})
         return messages
 

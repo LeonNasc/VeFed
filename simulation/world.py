@@ -540,7 +540,12 @@ class WorldEngine:
 
         if self._static_mode:
             events = self._generate_static_round()
-            # Inject events into the clinic queue so logging still works
+            # Add opening patient statement to each event before the LLM sees it.
+            # Without this, ev.conversation is empty → LLM skips Q&A →
+            # _build_dataset finds no patient turns → event dropped from training.
+            for ev in events:
+                opening = self._generate_static_opening(ev)
+                ev.conversation.insert(0, {"role": "patient", "text": opening})
             diag_fn = getattr(self, "_diagnostic_fn", None)
             if diag_fn is not None:
                 events = [diag_fn(ev) for ev in events]
@@ -729,6 +734,32 @@ class WorldEngine:
         # Keep log bounded
         if len(self.event_log) > 200:
             self.event_log = self.event_log[-200:]
+
+    def _generate_static_opening(self, event: DiagnosticEvent) -> str:
+        """
+        Generate an opening statement for a synthetic (static-mode) event.
+        Uses PatientLLMClient when wired, falls back to SymptomNarrator templates.
+        """
+        from simulation.symptom_language import SymptomNarrator, background_opening
+        patient_llm = getattr(self, "_patient_llm", None)
+        personality = event.personality
+
+        if event.is_background:
+            if patient_llm is not None and event.complaint_context:
+                try:
+                    return patient_llm.complaint_opening(event.complaint_context, personality)
+                except Exception:
+                    pass
+            return background_opening(personality, self._rng)
+        else:
+            if patient_llm is not None:
+                try:
+                    return patient_llm.opening_statement(
+                        event.severity, event.days_infected, personality)
+                except Exception:
+                    pass
+            return SymptomNarrator().opening_statement(
+                event.severity, event.days_infected, personality)
 
     def _collect_background_cases(self) -> list[DiagnosticEvent]:
         """

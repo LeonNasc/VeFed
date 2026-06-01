@@ -248,6 +248,10 @@ class HealthyCaseTable:
     def get(self, variable: str, day: int) -> float | None:
         return self._data.get(variable)
 
+    @property
+    def variables(self) -> list[str]:
+        return list(self._data.keys())
+
     def band(self, variable: str, day: int) -> str:
         val = self.get(variable, day)
         if val is None:
