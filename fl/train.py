@@ -342,10 +342,12 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
         for i, silo in enumerate(silos):
             if silo.world.is_done:
-                # Done silo: conditionally accept global model, then re-upload weights
+                # Done silo: passive observer — silently adopts global weights only
+                # if they strictly improve on its last checkpoint (see try_accept_global).
+                # fedavg_n=0 means frozen weights never enter the aggregation.
                 silo.try_accept_global(global_weights)
                 m = silo.run_round()  # frozen path — no simulation
-                fedavg_n = silo._frozen_n  # fixed weight for FedAvg
+                fedavg_n = 0  # passive observer: receives updates, never votes
             else:
                 silo.set_weights(global_weights)
                 m = silo.run_round()

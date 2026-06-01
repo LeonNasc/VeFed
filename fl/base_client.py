@@ -439,15 +439,25 @@ class WorldFLClient:
 
     # ── Frozen-silo helpers ────────────────────────────────────────────────────
 
-    def try_accept_global(
-        self, global_weights: list, threshold: float = 0.10
-    ) -> bool:
+    def try_accept_global(self, global_weights: list) -> bool:
         """
-        For done silos: evaluate the global model on the frozen evaluation batch.
-        Accept if triage_acc degradation ≤ threshold; otherwise revert to frozen weights.
+        Passive-observer update policy for done silos.
 
-        The frozen batch is the last active round's events — the best available proxy
-        for whether the global model still serves this silo's patient population.
+        Strategy: selective silent adoption
+        ------------------------------------
+        Once a silo's epidemic is extinct it stops contributing to FedAvg
+        (fedavg_n=0 in the training loop), so its stale frozen weights never
+        pollute the global aggregation.  However, the silo continues to silently
+        benefit from federation: each round it evaluates the incoming global model
+        against its frozen evaluation batch (the last active round's events).
+        If — and only if — the global model strictly outperforms the silo's last
+        contributed checkpoint, the silo adopts the new weights.
+
+        Strict improvement is required (not "within threshold") because the silo
+        has no new data with which to recover from a regression.  The result is a
+        ratchet: a done silo's triage quality can only improve over rounds, and
+        it can never drag the global model backward.
+
         Returns True if the global model was accepted.
         """
         if not self._frozen_eval_batch:
@@ -461,12 +471,12 @@ class WorldFLClient:
             set_lora_weights(self.model, self._frozen_weights)
             return False
 
-        if self._frozen_triage_acc - global_acc > threshold:
-            # Regression too large — revert
+        if global_acc <= self._frozen_triage_acc:
+            # No improvement — keep last contributed checkpoint
             set_lora_weights(self.model, self._frozen_weights)
             return False
 
-        # Accept — update frozen reference to the new accepted weights
+        # Strict improvement — adopt as new checkpoint
         self._frozen_weights    = self.get_weights()
         self._frozen_triage_acc = global_acc
         return True

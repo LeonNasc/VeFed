@@ -56,6 +56,10 @@ def build_model(config: LoRAConfig):
         target_modules=config.target_modules,
         lora_dropout=config.lora_dropout,
         bias="none",
+        # Keep the classification head trainable and included in weight exchange.
+        # Without this, PEFT freezes the randomly-initialised head and training
+        # never propagates to the output layer.
+        modules_to_save=["pre_classifier", "classifier"],
     )
     return get_peft_model(base, peft_cfg)
 
@@ -63,23 +67,21 @@ def build_model(config: LoRAConfig):
 # ── Weight extraction / loading ───────────────────────────────────────────────
 
 def get_lora_weights(model) -> list[np.ndarray]:
-    """Return all trainable LoRA adapter tensors as numpy arrays (ordered)."""
+    """Return all trainable parameters (LoRA adapters + classifier head) as numpy arrays."""
     return [
         p.detach().cpu().numpy()
-        for name, p in model.named_parameters()
-        if "lora_" in name and p.requires_grad
+        for _, p in model.named_parameters()
+        if p.requires_grad
     ]
 
 
 def set_lora_weights(model, weights: list[np.ndarray]) -> None:
-    """Write averaged LoRA weights back into the model in-place."""
+    """Write federated weights back into all trainable parameters in-place."""
     import torch
 
     idx = 0
-    for name, p in model.named_parameters():
-        if "lora_" in name and p.requires_grad:
-            # Respect the parameter's current device — avoids CPU↔GPU mismatch
-            # when the model has been moved to GPU before set_weights() is called.
+    for _, p in model.named_parameters():
+        if p.requires_grad:
             p.data = torch.as_tensor(weights[idx], dtype=p.dtype).to(p.device)
             idx += 1
 

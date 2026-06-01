@@ -292,7 +292,9 @@ class WorldEngine:
 
         # Daily log file — appended at end of each simulated day
         from pathlib import Path
-        log_path = Path(f"sim_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        log_dir = Path(__file__).resolve().parent.parent / "sim_logs"
+        log_dir.mkdir(exist_ok=True)
+        log_path = log_dir / f"sim_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         self._log_file = log_path.open("w", encoding="utf-8", buffering=1)
         self._log_path = log_path
         self._log_file.write(
