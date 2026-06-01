@@ -172,32 +172,32 @@ def _make_presets() -> dict[str, RunConfig]:
             end_condition_param = 30,   # fixed 30 rounds
             min_events_to_train = 8,
             local_epochs        = 3,
-            sim_days            = 5,    # 100 events/silo/round (20/day × 5 days)
+            sim_days            = 5,    # 200 events/silo/round (40/day × 5 days)
             world_configs       = [
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
                             disease_weights=[0.55, 0.25, 0.20],
-                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=40,
                             end_condition="horizon", end_condition_param=30),
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
                             disease_weights=[0.15, 0.65, 0.20],
-                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=40,
                             end_condition="horizon", end_condition_param=30),
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
                             disease_weights=[0.20, 0.20, 0.60],
-                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=40,
                             end_condition="horizon", end_condition_param=30),
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
                             disease_weights=[0.40, 0.45, 0.15],
-                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=40,
                             end_condition="horizon", end_condition_param=30),
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
                             disease_weights=[0.35, 0.15, 0.50],
-                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=40,
                             end_condition="horizon", end_condition_param=30),
             ],
         ),
@@ -351,9 +351,10 @@ def _wizard() -> RunConfig:
     mode_choice = questionary.select(
         "Select mode:",
         choices=[
-            questionary.Choice("Analytics TUI  — SIR chart · clinic log · agent panels", value="tui"),
-            questionary.Choice("Roguelike TUI  — ncurses map view of the world",          value="rogue"),
-            questionary.Choice("FL Training    — federated LoRA training, logs to W&B",   value="fl"),
+            questionary.Choice("Town View      — 2D animated agents walking between buildings", value="pygame"),
+            questionary.Choice("Analytics TUI  — SIR chart · clinic log · agent panels",       value="tui"),
+            questionary.Choice("Roguelike TUI  — ncurses map view of the world",               value="rogue"),
+            questionary.Choice("FL Training    — federated LoRA training, logs to W&B",        value="fl"),
         ],
         default=cfg.mode,
         style=style,
@@ -586,7 +587,7 @@ def _parse_cli() -> RunConfig:
     )
     p.add_argument("--preset", choices=list(PRESET_DESCRIPTIONS), default=None,
                    help="Load a named preset; other flags override individual fields")
-    p.add_argument("--mode", choices=["tui", "rogue", "fl", "centralized", "compare"], default=None)
+    p.add_argument("--mode", choices=["tui", "rogue", "pygame", "fl", "centralized", "compare"], default=None)
     p.add_argument("--agents",   type=int, default=None)
     p.add_argument("--seed",     type=int, default=None)
     p.add_argument("--progressions", nargs="+", default=None,
@@ -735,6 +736,10 @@ def _launch(cfg: RunConfig) -> None:
         import curses
         from ui.rogue_tui import RogueTUI
         curses.wrapper(lambda s: RogueTUI(s, world).run())
+
+    elif cfg.mode == "pygame":
+        from ui.pygame_world import PygameWorld
+        PygameWorld(world).run()
 
 
 
