@@ -158,6 +158,50 @@ def _make_presets() -> dict[str, RunConfig]:
             ],
         ),
 
+        # ── static-noniid ─────────────────────────────────────────────────────
+        # Non-IID without SIR dynamics. Each silo generates a fixed number of
+        # clinic visits per round; `infectious_fraction` is the "slider" that
+        # controls the proportion that are infectious disease cases.
+        # Removes epidemic temporal distribution shift — clean FL baseline.
+        "static-noniid": RunConfig(
+            mode                = "fl",
+            num_agents          = 1,    # unused in static mode
+            num_silos           = 5,
+            disease_strategy    = "Standard Flu",
+            end_condition       = "horizon",
+            end_condition_param = 30,   # fixed 30 rounds
+            min_events_to_train = 8,
+            local_epochs        = 3,
+            sim_days            = 2,
+            world_configs       = [
+                WorldConfig(num_agents=1,
+                            progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.55, 0.25, 0.20],
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            end_condition="horizon", end_condition_param=30),
+                WorldConfig(num_agents=1,
+                            progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.15, 0.65, 0.20],
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            end_condition="horizon", end_condition_param=30),
+                WorldConfig(num_agents=1,
+                            progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.20, 0.20, 0.60],
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            end_condition="horizon", end_condition_param=30),
+                WorldConfig(num_agents=1,
+                            progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.40, 0.45, 0.15],
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            end_condition="horizon", end_condition_param=30),
+                WorldConfig(num_agents=1,
+                            progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.35, 0.15, 0.50],
+                            static_mode=True, infectious_fraction=0.60, cases_per_day=20,
+                            end_condition="horizon", end_condition_param=30),
+            ],
+        ),
+
         # ── non-iid-10 ───────────────────────────────────────────────────────
         # 10 silos with deterministic disease assignments across 3 archetypes.
         # 4 Flu-dominant · 3 Corona-dominant · 3 Sepsis-dominant silos.
@@ -239,6 +283,7 @@ PRESET_DESCRIPTIONS = {
     "multi-disease":"5 silos · 100 agents · 3 archetypes · Dirichlet α=0.3 non-IID",
     "non-iid":      "3 silos · explicit disease profiles (Flu+Corona / Flu+Sepsis / Sepsis)",
     "non-iid-10":   "10 silos · deterministic single-disease (4×Flu / 3×Corona / 3×Sepsis)",
+    "static-noniid":"5 silos · no SIR · fixed cases/day · infectious_fraction slider",
     "hard-triage":  "3 silos · Slow Burn + Mild Corona · maximum triage difficulty",
     "long-burn":    "3 silos · 300 agents · Slow Burn + Corona · sim_days=2 · embedding studies",
 }

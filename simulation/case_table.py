@@ -215,6 +215,52 @@ class MimicCaseTable(CaseTable):
         return 0.0
 
 
+# ─── Healthy-baseline case table ─────────────────────────────────────────────
+
+class HealthyCaseTable:
+    """
+    Single-day vitals table for a non-infectious clinic visitor.
+
+    Generates one set of values in the normal range with realistic
+    inter-individual variation — enough for the doctor to take vitals
+    and confirm the patient is healthy, without needing a disease trajectory.
+    """
+
+    # Tighter noise (σ fraction of normal-range width) for healthy individuals
+    NOISE_FRACTION = 0.10
+
+    def __init__(self, rng: random.Random):
+        self._data = self._generate(rng)
+
+    def _generate(self, rng: random.Random) -> dict[str, float]:
+        data: dict[str, float] = {}
+        for var, (lo, hi) in NORMAL_RANGES.items():
+            mid   = (lo + hi) / 2.0
+            sigma = (hi - lo) * self.NOISE_FRACTION
+            val   = rng.gauss(mid, sigma)
+            # Clamp to slightly outside normal range to allow borderline readings
+            val   = max(lo * 0.92, min(hi * 1.08, val))
+            if var == "SpO2":
+                val = min(100.0, val)
+            data[var] = round(val, 1)
+        return data
+
+    def get(self, variable: str, day: int) -> float | None:
+        return self._data.get(variable)
+
+    def band(self, variable: str, day: int) -> str:
+        val = self.get(variable, day)
+        if val is None:
+            return "normal"
+        lo, hi = NORMAL_RANGES.get(variable, (0, 100))
+        margin = (hi - lo) * 0.15
+        if val < lo - margin or val > hi + margin:
+            return "abnormal"
+        elif val < lo or val > hi:
+            return "borderline"
+        return "normal"
+
+
 # ─── Clinical scoring ─────────────────────────────────────────────────────────
 
 def news2_score(case_table: CaseTable, day: int) -> int:

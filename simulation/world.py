@@ -204,6 +204,10 @@ class WorldEngine:
                  reveal_incubating_icd: bool = True,
                  initial_seeds: int = 3,
                  disease_weights: list[float] | None = None,
+                 # Static mode — bypasses SIR; visits generated at fixed rate
+                 static_mode: bool = False,
+                 infectious_fraction: float = 0.5,
+                 cases_per_day: int = 20,
                  # FL parameters — omit for non-FL (TUI/rogue) simulations
                  lora_config=None,
                  sim_days: int = 7,
@@ -293,6 +297,11 @@ class WorldEngine:
 
         # Noise parameters
         self.background_visit_rate: float = background_visit_rate
+
+        # Static mode — bypasses SIR dynamics
+        self._static_mode          = static_mode
+        self._infectious_fraction  = infectious_fraction
+        self._cases_per_day        = cases_per_day
 
         # FL extension points
         self.fl_round:     int         = 0
@@ -447,6 +456,78 @@ class WorldEngine:
             )
         return self._learner
 
+    def _generate_static_round(self) -> list:
+        """
+        Static-mode event generation — no SIR, no agents.
+
+        Produces exactly `cases_per_day * sim_days` DiagnosticEvents per round.
+        Each event is infectious (drawn from this silo's disease_weights) with
+        probability `infectious_fraction`, and a non-infectious background
+        complaint otherwise.  Advances a round counter so the end condition
+        can still fire on a horizon limit.
+        """
+        from simulation.case_table import CaseTable, HealthyCaseTable
+        from simulation.case_table import management_from_vitals
+        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
+        from simulation.models import DiagnosticEvent
+        from simulation.symptom_language import Personality
+
+        self.fl_round += 1
+        events: list = []
+        total = self._cases_per_day * self._sim_days
+
+        for k in range(total):
+            personality = self._rng.choice(list(Personality))
+            if self._rng.random() < self._infectious_fraction:
+                # ── Infectious visit ──────────────────────────────────────────
+                prog = self._rng.choices(self.progressions,
+                                         weights=self._disease_weights)[0]
+                traj = prog.sample_trajectory(self._rng)
+                ct   = CaseTable(traj, self._rng, max_days=30)
+
+                # Pick a plausible symptomatic day (post-incubation, pre-recovery)
+                incubation = int(getattr(traj, "incubation_days", 2))
+                rise       = int(getattr(traj, "rise_days",       3))
+                day = self._rng.randint(incubation + 1,
+                                        max(incubation + 2, incubation + rise + 3))
+
+                sev  = ct._severity_at_day(day)
+                mgmt = management_from_vitals(ct, day)
+                icd  = getattr(traj, "icd_code", prog.icd_code)
+                ev = DiagnosticEvent(
+                    agent_id      = f"static_{k}",
+                    severity      = sev,
+                    symptoms      = max(0.0, sev * 0.8 + self._rng.gauss(0, 0.08)),
+                    days_infected = day,
+                    personality   = personality,
+                    case_table    = ct,
+                    ground_truth  = f"{icd} / {mgmt}",
+                    is_background = False,
+                )
+            else:
+                # ── Non-infectious visit ──────────────────────────────────────
+                complaint = self._rng.choice(NON_INFECTIOUS_COMPLAINTS)
+                ev = DiagnosticEvent(
+                    agent_id          = f"bg_{k}",
+                    severity          = 0.0,
+                    symptoms          = self._rng.uniform(0.0, 0.10),
+                    days_infected     = 0,
+                    personality       = personality,
+                    case_table        = HealthyCaseTable(self._rng),
+                    ground_truth      = f"{complaint.icd_code} / {complaint.management}",
+                    is_background     = True,
+                    complaint_context = complaint.prompt_context,
+                )
+            events.append(ev)
+
+        # In static mode use fl_round as the "day" proxy for HorizonCondition
+        self.current_day = self.fl_round
+        if self._end_condition is not None and self._end_condition.check(self):
+            self.is_done    = True
+            self.stop_reason = self._end_condition.reason
+
+        return events
+
     def run_round(self) -> dict:
         """
         One complete FL round: advance sim_days → evaluate → train → return metrics.
@@ -457,12 +538,21 @@ class WorldEngine:
                 self.learner.snapshot_for_freeze(self.last_round_events)
             return self.learner.frozen_metrics(self.sir_model)
 
-        start = len(self.clinic_queue.processed)
-        for _ in range(self._sim_days * self.TICKS_PER_DAY):
-            self.step_tick()
-            if self.is_done:
-                break
-        events = self.clinic_queue.processed[start:]
+        if self._static_mode:
+            events = self._generate_static_round()
+            # Inject events into the clinic queue so logging still works
+            diag_fn = getattr(self, "_diagnostic_fn", None)
+            if diag_fn is not None:
+                events = [diag_fn(ev) for ev in events]
+            self.clinic_queue.processed.extend(events)
+        else:
+            start = len(self.clinic_queue.processed)
+            for _ in range(self._sim_days * self.TICKS_PER_DAY):
+                self.step_tick()
+                if self.is_done:
+                    break
+            events = self.clinic_queue.processed[start:]
+
         self.last_round_events = events
         num_events = len(events)
         sir = self.sir_model
@@ -648,6 +738,7 @@ class WorldEngine:
         Rate is configurable via background_visit_rate (default 2.5 %/agent/day).
         """
         from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
+        from simulation.case_table import HealthyCaseTable
         cases = []
         for agent in self.agents:
             if agent.status not in (HealthStatus.SUSCEPTIBLE, HealthStatus.RECOVERED):
@@ -662,7 +753,7 @@ class WorldEngine:
                     symptoms          = self._rng.uniform(0.0, 0.10),
                     days_infected     = 0,
                     personality       = agent.personality,
-                    case_table        = None,
+                    case_table        = HealthyCaseTable(self._rng),
                     ground_truth      = f"{complaint.icd_code} / {complaint.management}",
                     is_background     = True,
                     complaint_context = complaint.prompt_context,

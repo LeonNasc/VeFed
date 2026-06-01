@@ -76,6 +76,10 @@ class WorldConfig:
     seed_offset:           int         = 0
     reveal_incubating_icd: bool        = True
     initial_seeds:         int         = 3
+    # Static mode — bypasses SIR; set infectious_fraction as the "slider"
+    static_mode:           bool        = False
+    infectious_fraction:   float       = 0.5   # fraction of visits that are infectious
+    cases_per_day:         int         = 20    # clinic throughput per simulated day
 
 
 # ── Config dataclass ──────────────────────────────────────────────────────────
@@ -189,15 +193,18 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
 
         if wc is not None:
-            progs          = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
-            strategy       = STRATEGIES.get(wc.disease_strategy)
-            end_cond       = end_condition_from_config(wc.end_condition, wc.end_condition_param)
-            n_agents       = wc.num_agents
-            bg_rate        = wc.background_visit_rate
-            bscale         = wc.beta_scale
-            s_offset       = wc.seed_offset
-            rev_incub_icd  = wc.reveal_incubating_icd
-            n_seeds        = wc.initial_seeds
+            progs               = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy            = STRATEGIES.get(wc.disease_strategy)
+            end_cond            = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents            = wc.num_agents
+            bg_rate             = wc.background_visit_rate
+            bscale              = wc.beta_scale
+            s_offset            = wc.seed_offset
+            rev_incub_icd       = wc.reveal_incubating_icd
+            n_seeds             = wc.initial_seeds
+            static_mode         = wc.static_mode
+            infectious_fraction = wc.infectious_fraction
+            cases_per_day       = wc.cases_per_day
         else:
             unknown = [p for p in cfg.progressions if p not in PROGRESSION_STRATEGIES]
             if unknown:
@@ -205,15 +212,18 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                     f"Unknown progression(s): {unknown}. "
                     f"Available: {list(PROGRESSION_STRATEGIES)}"
                 )
-            progs         = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
-            strategy      = STRATEGIES.get(cfg.disease_strategy)
-            end_cond      = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
-            n_agents      = cfg.num_agents
-            bg_rate       = 0.025
-            bscale        = cfg.beta_scale
-            s_offset      = 0
-            rev_incub_icd = True
-            n_seeds       = cfg.initial_seeds
+            progs               = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy            = STRATEGIES.get(cfg.disease_strategy)
+            end_cond            = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents            = cfg.num_agents
+            bg_rate             = 0.025
+            bscale              = cfg.beta_scale
+            s_offset            = 0
+            rev_incub_icd       = True
+            n_seeds             = cfg.initial_seeds
+            static_mode         = False
+            infectious_fraction = 0.5
+            cases_per_day       = 20
 
         # Disease weights: WorldConfig explicit weights take priority;
         # fall back to Dirichlet sampling; fall back to uniform.
@@ -237,6 +247,9 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             reveal_incubating_icd  = rev_incub_icd,
             initial_seeds          = n_seeds,
             disease_weights        = d_weights,
+            static_mode            = static_mode,
+            infectious_fraction    = infectious_fraction,
+            cases_per_day          = cases_per_day,
             lora_config            = cfg.lora_config(),
             sim_days               = cfg.sim_days,
             min_events_to_train    = cfg.min_events_to_train,
