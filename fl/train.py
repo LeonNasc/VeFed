@@ -296,14 +296,17 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                     lambda ev, _q=q, _lib=_lib: ollama_client.diagnose(
                         ev, _queue=_q, _proto_lib=_lib)
                 )
-            # Attach the shared DistilBERT encoder for prototype retrieval
+            # Dedicated CPU encoder for prototype retrieval — kept separate from
+            # the FL models so it's never released mid-run and always on CPU.
             from transformers import AutoTokenizer
+            from fl.lora import build_model as _build_model
             _enc_tokenizer = AutoTokenizer.from_pretrained(cfg.lora_config().model_name_or_path)
+            _enc_model     = _build_model(cfg.lora_config()).cpu()
             ollama_client.set_prototype_library(
-                library    = None,        # per-silo lib passed at diagnose() time
-                encoder_model = silos[0].learner.model,  # shared encoder (CPU)
-                tokenizer  = _enc_tokenizer,
-                k          = 3,
+                library       = None,     # per-silo lib passed at diagnose() time
+                encoder_model = _enc_model,
+                tokenizer     = _enc_tokenizer,
+                k             = 3,
             )
             ollama_active = True
             ollama_status = f"active ({ollama_client.model})"
@@ -412,7 +415,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                 for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                             "combined_acc", "triage_macro_f1", "danger_rate",
                             "avg_turns", "first_turn_rate", "action_accuracy",
-                            "fp_escalation_rate", "local_triage_acc", "fl_gain"):
+                            "fp_escalation_rate", "local_triage_acc", "local_diag_acc",
+                            "fl_gain", "fl_diag_gain"):
                     v = m.get(sub, float("nan"))
                     if v == v:
                         agg_key = f"aggregated/{sub}"
@@ -648,7 +652,7 @@ def run_centralized_training(
         _own_tracker  = False
     else:
         _embed_dir    = Path(f"viz_output/embeddings/run_{_run_id}_centralized")
-        _tracker      = EmbeddingTracker(_embed_dir, lora_cfg)
+        _tracker      = EmbeddingTracker(_embed_dir, cfg.lora_config())
         _own_tracker  = True
         print(f"  [embed] {len(_tracker.probe_events)} probe events ready\n")
 
@@ -660,11 +664,9 @@ def run_centralized_training(
         f"{'─'*60}\n"
     )
 
-    # Dummy global weights for snapshot (centralized has no FedAvg global)
-    # We pass the centralized model's weights as an extra named model so the
-    # tracker records it under "centralized" alongside the federated "global".
-    _dummy_global = silos[0].get_weights()
-    silos[0].release_model()
+    # Dummy global weights for snapshot — use the centralized trainer's model,
+    # not silos[0] (centralized worlds have no lora_config).
+    _dummy_global = trainer.get_weights()
 
     for round_num in range(1, cfg.max_rounds + 1):
         m = trainer.run_round()

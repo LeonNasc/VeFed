@@ -389,7 +389,7 @@ class EmbeddingTracker:
         mod_keys = [k for k in ["global"] + [f"silo_{i}_fed" for i in range(n_silos)]
                     if k in snap]
         cols     = len(mod_keys)
-        if cols:
+        if cols > 0:
             fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5),
                                      constrained_layout=True)
             if cols == 1:
@@ -534,6 +534,8 @@ class EmbeddingTracker:
         mod_keys  = ["global"] + [f"silo_{i}_fed" for i in range(n_silos)]
         mod_keys  = [k for k in mod_keys if k in snap]
         cols      = len(mod_keys)
+        if cols == 0:
+            return None
 
         fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5), constrained_layout=True)
         if cols == 1:
@@ -570,6 +572,8 @@ class EmbeddingTracker:
     def _plot_fl_gain(self, last_round, n_silos, icd3_list, unique_icd3,
                       icd_color, plt) -> Optional[Path]:
         """Final round: federated vs local-only per silo (logit-space UMAP)."""
+        if n_silos == 0:
+            return None
         snap = self._snapshots[last_round]
 
         fig, axes = plt.subplots(2, n_silos, figsize=(n_silos * 3.0, 6.5),

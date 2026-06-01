@@ -278,13 +278,14 @@ class OllamaDiagnosticClient:
             try:
                 import torch
                 enc_model, tokenizer = self._proto_encoder
+                device = next(enc_model.parameters()).device
                 enc = tokenizer([opening], padding=True, truncation=True,
                                 max_length=128, return_tensors="pt")
                 enc_model.eval()
                 with torch.no_grad():
                     out = enc_model(
-                        input_ids=enc["input_ids"],
-                        attention_mask=enc["attention_mask"],
+                        input_ids=enc["input_ids"].to(device),
+                        attention_mask=enc["attention_mask"].to(device),
                         output_hidden_states=True,
                     )
                 query_vec = out.hidden_states[-1][0, 0, :].cpu().numpy()

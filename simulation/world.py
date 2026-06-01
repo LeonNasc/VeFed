@@ -564,7 +564,8 @@ class WorldEngine:
 
         metrics       = self.learner.evaluate(events)
         local_metrics = self.learner.evaluate_local(events)
-        local_acc     = local_metrics.get("triage_acc", float("nan"))
+        local_triage  = local_metrics.get("triage_acc", float("nan"))
+        local_diag    = local_metrics.get("diag_acc",   float("nan"))
 
         if num_events >= self.learner.min_events_to_train:
             n, epoch_losses = self.learner.train(events)
@@ -575,8 +576,10 @@ class WorldEngine:
             trained = 0
 
         nan = float("nan")
-        fed_acc = metrics.get("triage_acc", nan)
-        fl_gain = fed_acc - local_acc if (fed_acc == fed_acc and local_acc == local_acc) else nan
+        fed_triage  = metrics.get("triage_acc", nan)
+        fed_diag    = metrics.get("diag_acc",   nan)
+        fl_gain     = fed_triage - local_triage if (fed_triage == fed_triage and local_triage == local_triage) else nan
+        fl_diag_gain = fed_diag - local_diag   if (fed_diag   == fed_diag   and local_diag   == local_diag)   else nan
 
         metrics.update(
             trained_on       = n,
@@ -586,8 +589,10 @@ class WorldEngine:
             sir_s            = sir.S,
             sir_i            = sir.I,
             sir_r            = sir.R,
-            local_triage_acc = local_acc,
+            local_triage_acc = local_triage,
+            local_diag_acc   = local_diag,
             fl_gain          = fl_gain,
+            fl_diag_gain     = fl_diag_gain,
         )
         return metrics
 

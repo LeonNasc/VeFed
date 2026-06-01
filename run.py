@@ -172,7 +172,7 @@ def _make_presets() -> dict[str, RunConfig]:
             end_condition_param = 30,   # fixed 30 rounds
             min_events_to_train = 8,
             local_epochs        = 3,
-            sim_days            = 2,
+            sim_days            = 5,    # 100 events/silo/round (20/day × 5 days)
             world_configs       = [
                 WorldConfig(num_agents=1,
                             progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
