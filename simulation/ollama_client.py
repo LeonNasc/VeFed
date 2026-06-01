@@ -148,8 +148,9 @@ class OllamaDiagnosticClient:
         Refresh the few-shot example bank from a batch of processed DiagnosticEvents.
 
         Selects up to max_per_tier correct conversations per management tier,
-        ordered by fewest turns.  Call after each FL round so the doctor
-        improves calibration over time.
+        ordered by fewest turns.  Each example stores the full message sequence
+        (question → patient answer → vitals_request → vitals → decision) so the
+        model sees the correct protocol, not a shortcut opening→decision.
         """
         mgmt_to_action = {
             "home rest":   DiagnosticAction.RECOVER,
@@ -157,7 +158,7 @@ class OllamaDiagnosticClient:
             "hospitalise": DiagnosticAction.HOSPITALISE,
         }
 
-        by_tier: dict[str, list[tuple[int, dict]]] = {t: [] for t in mgmt_to_action}
+        by_tier: dict[str, list[tuple[int, list]]] = {t: [] for t in mgmt_to_action}
 
         for ev in events:
             if not ev.ground_truth or not ev.action or not ev.conversation:
@@ -169,28 +170,19 @@ class OllamaDiagnosticClient:
             if expected != ev.action:
                 continue
 
-            patient_turns = [t["text"] for t in ev.conversation if t["role"] == "patient"]
-            if not patient_turns:
+            # Only use conversations that went through the full protocol
+            roles = [t["role"] for t in ev.conversation]
+            if "doctor" not in roles or len(ev.conversation) < 3:
                 continue
 
-            doctor_json = json.dumps({
-                "type":      "decision",
-                "action":    ev.action.value,
-                "label":     ev.oracle_label or "unknown",
-                "diagnosis": ev.diagnosis or "",
-                "notes":     ev.notes or "",
-            })
-
-            n_turns = len(ev.conversation)
-            by_tier[parts[1]].append((n_turns, {
-                "patient":     patient_turns[0],
-                "doctor_json": doctor_json,
-            }))
+            messages = self._conversation_to_messages(ev)
+            n_turns  = len(ev.conversation)
+            by_tier[parts[1]].append((n_turns, messages))
 
         self._examples = []
         for tier_examples in by_tier.values():
             tier_examples.sort(key=lambda x: x[0])
-            self._examples.extend(ex for _, ex in tier_examples[:max_per_tier])
+            self._examples.extend(msgs for _, msgs in tier_examples[:max_per_tier])
 
     def num_examples(self) -> int:
         return len(self._examples)
@@ -260,10 +252,36 @@ class OllamaDiagnosticClient:
             "I am not feeling well.",
         )
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for ex in self._examples:
-            messages.append({"role": "user",      "content": ex["patient"]})
-            messages.append({"role": "assistant", "content": ex["doctor_json"]})
+        for ex_messages in self._examples:
+            messages.extend(ex_messages)
         messages.append({"role": "user", "content": opening})
+        return messages
+
+    def _conversation_to_messages(self, ev: DiagnosticEvent) -> list[dict]:
+        """Convert a DiagnosticEvent's conversation into Ollama message format."""
+        messages = []
+        decision_json = json.dumps({
+            "type":      "decision",
+            "action":    ev.action.value,
+            "label":     ev.oracle_label or "unknown",
+            "diagnosis": ev.diagnosis or "",
+            "notes":     ev.notes or "",
+        })
+        for turn in ev.conversation:
+            role, text = turn["role"], turn["text"]
+            if role == "patient":
+                messages.append({"role": "user", "content": text})
+            elif role == "vitals":
+                messages.append({"role": "user", "content": text})
+            elif role == "doctor":
+                if "[measuring vitals]" in text:
+                    messages.append({"role": "assistant",
+                                     "content": json.dumps({"type": "vitals_request"})})
+                elif text.startswith("Diagnosis:"):
+                    messages.append({"role": "assistant", "content": decision_json})
+                else:
+                    messages.append({"role": "assistant",
+                                     "content": json.dumps({"type": "question", "text": text})})
         return messages
 
     def _call_ollama(self, messages: list[dict]) -> str:

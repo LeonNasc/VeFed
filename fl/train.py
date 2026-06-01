@@ -43,7 +43,6 @@ from typing import Optional
 import numpy as np
 
 from fl.lora import LoRAConfig
-from fl.base_client import WorldFLClient
 from simulation.world import WorldEngine
 from simulation.progression import PROGRESSION_STRATEGIES, DiseaseProgressionStrategy
 from simulation.end_conditions import EndCondition, from_config as end_condition_from_config
@@ -68,6 +67,7 @@ class WorldConfig:
     """
     num_agents:            int         = 30
     progressions:          list[str]   = field(default_factory=lambda: ["Standard Flu"])
+    disease_weights:       Optional[list[float]] = None  # per-disease prevalence; None = uniform
     disease_strategy:      str         = "Standard Flu"
     beta_scale:            float       = 1.0
     background_visit_rate: float       = 0.025
@@ -145,7 +145,7 @@ def _fedavg(
 # ── Main training loop ────────────────────────────────────────────────────────
 
 def run_federated_training(cfg: FLTrainConfig | None = None,
-                           _shared_tracker=None, **kwargs) -> list[WorldFLClient]:
+                           _shared_tracker=None, **kwargs) -> list[WorldEngine]:
     """
     Run federated LoRA training across N WorldEngine silos.
 
@@ -158,7 +158,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
     Returns
     -------
-    List of trained WorldFLClient instances (weights updated to final global model).
+    List of trained WorldEngine instances (weights updated to final global model).
     """
     if cfg is None:
         cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
@@ -215,13 +215,16 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             rev_incub_icd = True
             n_seeds       = cfg.initial_seeds
 
-        # Dirichlet per-silo disease weights (reproducible: seed + silo index)
-        if len(progs) > 1 and cfg.dirichlet_alpha > 0:
+        # Disease weights: WorldConfig explicit weights take priority;
+        # fall back to Dirichlet sampling; fall back to uniform.
+        if wc is not None and wc.disease_weights is not None:
+            d_weights = wc.disease_weights
+        elif len(progs) > 1 and cfg.dirichlet_alpha > 0:
             d_weights = rng_dirichlet.dirichlet(
                 [cfg.dirichlet_alpha] * len(progs)
             ).tolist()
         else:
-            d_weights = None  # single disease or α=0 → uniform
+            d_weights = None  # uniform
 
         return WorldEngine(
             num_agents             = n_agents,
@@ -234,25 +237,17 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             reveal_incubating_icd  = rev_incub_icd,
             initial_seeds          = n_seeds,
             disease_weights        = d_weights,
+            lora_config            = cfg.lora_config(),
+            sim_days               = cfg.sim_days,
+            min_events_to_train    = cfg.min_events_to_train,
+            local_epochs           = cfg.local_epochs,
+            batch_size             = cfg.batch_size,
+            lr                     = cfg.lr,
+            replay_buffer_size     = cfg.replay_buffer_size,
         )
 
     # ── Create silos ──────────────────────────────────────────────────────────
-    lora_cfg = cfg.lora_config()
-    silos: list[WorldFLClient] = []
-    for i in range(cfg.num_silos):
-        world = _make_world(i)
-        silos.append(
-            WorldFLClient(
-                world                = world,
-                lora_config          = lora_cfg,
-                sim_days             = cfg.sim_days,
-                min_events_to_train  = cfg.min_events_to_train,
-                local_epochs         = cfg.local_epochs,
-                batch_size           = cfg.batch_size,
-                lr                   = cfg.lr,
-                replay_buffer_size   = cfg.replay_buffer_size,
-            )
-        )
+    silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
 
     # ── Wire LLM clients — single shared Ollama server, all silos call it ────
     ollama_client  = None
@@ -267,7 +262,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         patient_llm = PatientLLMClient(model=cfg.patient_model)
         if patient_llm.health_check():
             for silo in silos:
-                silo.world.set_patient_llm(patient_llm)
+                silo.set_patient_llm(patient_llm)
             patient_status = f"active ({patient_llm.model})"
         else:
             patient_llm    = None
@@ -277,8 +272,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         ollama_client = OllamaDiagnosticClient(patient_llm=patient_llm)
         if ollama_client.health_check():
             for silo in silos:
-                q = silo.world.clinic_queue
-                silo.world.register_diagnostic_fn(
+                q = silo.clinic_queue
+                silo.register_diagnostic_fn(
                     lambda ev, _q=q: ollama_client.diagnose(ev, _queue=_q)
                 )
             ollama_active = True
@@ -341,7 +336,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         snap_local_weights: list = []
 
         for i, silo in enumerate(silos):
-            if silo.world.is_done:
+            if silo.is_done:
                 # Done silo: passive observer — silently adopts global weights only
                 # if they strictly improve on its last checkpoint (see try_accept_global).
                 # fedavg_n=0 means frozen weights never enter the aggregation.
@@ -355,7 +350,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
             fed_w   = silo.get_weights()
             from fl.lora import get_lora_weights as _glw
-            local_w = _glw(silo.local_model)
+            local_w = _glw(silo.learner.local_model)
             snap_fed_weights.append(fed_w)
             snap_local_weights.append(local_w)
 
@@ -377,9 +372,9 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                 for ep_i, ep_loss in enumerate(epoch_losses):
                     log[f"silo_{i}/epoch_{ep_i}_loss"] = ep_loss
 
-            if silo.world.is_done:
+            if silo.is_done:
                 log[f"silo_{i}/done"] = 1
-                log[f"silo_{i}/stop_reason"] = silo.world.stop_reason or "done"
+                log[f"silo_{i}/stop_reason"] = silo.stop_reason or "done"
 
             if n > 0 and did_train:
                 agg_loss    += m.get("loss",       0.0) * n
@@ -411,13 +406,13 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             log["aggregated/llm_few_shot_examples"] = ollama_client.num_examples()
 
         # ── Early exit if all silos finished ──────────────────────────────────
-        if all(silo.world.is_done for silo in silos):
+        if all(silo.is_done for silo in silos):
             log["aggregated/all_silos_done"] = 1
             run.log(log, step=round_num)
             elapsed = time.time() - t0
             _print_round(round_num, cfg.max_rounds, log, elapsed)
             _report.add_round(round_num, log, [s.last_round_events for s in silos])
-            reasons = [silo.world.stop_reason or "done" for silo in silos]
+            reasons = [silo.stop_reason or "done" for silo in silos]
             print(f"\n  All silos finished: {reasons[0]}")
             break
 
@@ -579,24 +574,17 @@ def run_centralized_training(
             initial_seeds=n_seeds, disease_weights=d_weights,
         )
 
-    # Build silo clients (worlds only — we ignore their individual models)
-    lora_cfg = cfg.lora_config()
-    silos: list[WorldFLClient] = []
-    for i in range(cfg.num_silos):
-        silos.append(WorldFLClient(
-            world               = _make_world(i),
-            lora_config         = lora_cfg,
-            sim_days            = cfg.sim_days,
-            min_events_to_train = cfg.min_events_to_train,
-        ))
+    # Build worlds for centralized training (models managed by CentralizedTrainer)
+    silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
 
     trainer = CentralizedTrainer(
         silos               = silos,
-        lora_config         = lora_cfg,
+        lora_config         = cfg.lora_config(),
         local_epochs        = cfg.local_epochs,
         batch_size          = cfg.batch_size,
         lr                  = cfg.lr,
         min_events_to_train = cfg.min_events_to_train,
+        sim_days            = cfg.sim_days,
     )
 
     # ── Report ────────────────────────────────────────────────────────────────
@@ -696,7 +684,7 @@ def run_comparison(cfg: FLTrainConfig | None = None, **kwargs) -> dict:
     and a shared EmbeddingTracker so both models appear in the same UMAP space.
 
     Produces all standard federated plots plus comparison_fed_vs_centralized.png.
-    Returns dict with keys 'federated' (list[WorldFLClient]) and
+    Returns dict with keys 'federated' (list[WorldEngine]) and
     'centralized' (CentralizedTrainer) for downstream analysis.
     """
     import dataclasses

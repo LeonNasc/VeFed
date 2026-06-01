@@ -26,7 +26,8 @@ from typing import Optional
 
 import numpy as np
 
-from fl.base_client import WorldFLClient, CANONICAL_ICD_CODES, build_label_map
+from fl.learner import CANONICAL_ICD_CODES, build_label_map
+from simulation.world import WorldEngine
 from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 
 
@@ -52,9 +53,8 @@ class CentralizedTrainer:
 
     Parameters
     ----------
-    silos : list[WorldFLClient]
-        Pre-built silo clients.  Only their worlds and replay buffers are used;
-        their individual federated models are ignored.
+    silos : list[WorldEngine]
+        Pre-built silo worlds. Events are pooled across all silos each round.
     lora_config : LoRAConfig
     local_epochs : int
     batch_size : int
@@ -64,15 +64,17 @@ class CentralizedTrainer:
 
     def __init__(
         self,
-        silos: list[WorldFLClient],
+        silos: list[WorldEngine],
         lora_config: Optional[LoRAConfig] = None,
         local_epochs: int = 10,
         batch_size: int = 8,
         lr: float = 1e-4,
         min_events_to_train: int = 10,
+        sim_days: int = 7,
     ):
         import torch
         self.silos               = silos
+        self._sim_days           = sim_days
         self.local_epochs        = local_epochs
         self.batch_size          = batch_size
         self.lr                  = lr
@@ -128,11 +130,15 @@ class CentralizedTrainer:
         # ── Step 1: advance all worlds, collect events ────────────────────────
         round_events: list = []
         for silo in self.silos:
-            if not silo.world.is_done:
-                events = silo.run_simulation_round()
-                round_events.extend(events)
+            if not silo.is_done:
+                start = len(silo.clinic_queue.processed)
+                for _ in range(self._sim_days * silo.TICKS_PER_DAY):
+                    silo.step_tick()
+                    if silo.is_done:
+                        break
+                round_events.extend(silo.clinic_queue.processed[start:])
 
-        all_done = all(s.world.is_done for s in self.silos)
+        all_done = all(s.is_done for s in self.silos)
 
         # ── Step 2: extend shared pool ────────────────────────────────────────
         self._pool_buffer.extend(round_events)

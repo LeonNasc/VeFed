@@ -61,19 +61,9 @@ def _run_analytics(stdscr, num_agents: int = 30, seed: int = 42,
         _out.append(tui._export_summary)
 
 
-def _run_pygame(num_agents: int, seed: int) -> None:
-    from ui.pygame_ui import PygameUI
-    world, _, _ = _build_world(seed=seed, num_agents=num_agents)
-    PygameUI(world).run()
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Federated Simulated World simulator"
-    )
-    parser.add_argument(
-        "--pygame", action="store_true",
-        help="Launch pygame town view instead of the analytics TUI"
     )
     parser.add_argument("--agents", type=int, default=30,
                         help="Number of agents (default: 30)")
@@ -82,12 +72,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        if args.pygame:
-            _run_pygame(num_agents=args.agents, seed=args.seed)
-        else:
-            _out: list = []
-            curses.wrapper(_run_analytics, args.agents, args.seed, _out)
-            if _out and _out[0]:
-                print(_out[0])
+        _out: list = []
+        curses.wrapper(_run_analytics, args.agents, args.seed, _out)
+        if _out and _out[0]:
+            print(_out[0])
     except KeyboardInterrupt:
         pass

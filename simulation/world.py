@@ -203,7 +203,15 @@ class WorldEngine:
                  beta_scale: float = 1.0,
                  reveal_incubating_icd: bool = True,
                  initial_seeds: int = 3,
-                 disease_weights: list[float] | None = None):
+                 disease_weights: list[float] | None = None,
+                 # FL parameters — omit for non-FL (TUI/rogue) simulations
+                 lora_config=None,
+                 sim_days: int = 7,
+                 min_events_to_train: int = 10,
+                 local_epochs: int = 3,
+                 batch_size: int = 8,
+                 lr: float = 1e-4,
+                 replay_buffer_size: int = 2048):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
@@ -289,6 +297,19 @@ class WorldEngine:
         # FL extension points
         self.fl_round:     int         = 0
         self.fl_log:       list[str]   = []
+
+        # FL learner — created lazily on first run_round() call if lora_config set
+        self._lora_config        = lora_config
+        self._sim_days           = sim_days
+        self._fl_learner_kwargs  = dict(
+            min_events_to_train = min_events_to_train,
+            local_epochs        = local_epochs,
+            batch_size          = batch_size,
+            lr                  = lr,
+            replay_buffer_size  = replay_buffer_size,
+        )
+        self._learner            = None
+        self.last_round_events:  list = []
 
         # Daily log file — appended at end of each simulated day
         from pathlib import Path
@@ -411,18 +432,85 @@ class WorldEngine:
         """
         self._diagnostic_fn = fn
 
-    def run_fl_round(self) -> None:
+    # ── FL methods — only active when lora_config is set ─────────────────────
+
+    @property
+    def learner(self):
+        """Lazy-create FLLearner on first access. Imports torch only when needed."""
+        if self._learner is None:
+            if self._lora_config is None:
+                raise RuntimeError("WorldEngine: lora_config not set — not FL-enabled")
+            from fl.learner import FLLearner
+            self._learner = FLLearner(
+                lora_config=self._lora_config,
+                **self._fl_learner_kwargs,
+            )
+        return self._learner
+
+    def run_round(self) -> dict:
         """
-        Extension point §3.3 eq. 6–7.
-        Stub simulates FedAvg aggregation step.
-        Replace body with real flwr-llm orchestration.
+        One complete FL round: advance sim_days → evaluate → train → return metrics.
+        Called by the FL orchestrator (fl/train.py) each round.
         """
-        self.fl_round += 1
-        n_cases = len(self.clinic_queue.processed)
-        self.fl_log.append(
-            f"Round {self.fl_round}: aggregated {n_cases} cases "
-            f"(S={self.sir_model.S} I={self.sir_model.I} R={self.sir_model.R})"
+        if self.is_done:
+            if self.learner._frozen_weights is None:
+                self.learner.snapshot_for_freeze(self.last_round_events)
+            return self.learner.frozen_metrics(self.sir_model)
+
+        start = len(self.clinic_queue.processed)
+        for _ in range(self._sim_days * self.TICKS_PER_DAY):
+            self.step_tick()
+            if self.is_done:
+                break
+        events = self.clinic_queue.processed[start:]
+        self.last_round_events = events
+        num_events = len(events)
+        sir = self.sir_model
+
+        metrics       = self.learner.evaluate(events)
+        local_metrics = self.learner.evaluate_local(events)
+        local_acc     = local_metrics.get("triage_acc", float("nan"))
+
+        if num_events >= self.learner.min_events_to_train:
+            n, epoch_losses = self.learner.train(events)
+            self.learner.train_local(events)
+            trained = 1
+        else:
+            n, epoch_losses = 0, []
+            trained = 0
+
+        nan = float("nan")
+        fed_acc = metrics.get("triage_acc", nan)
+        fl_gain = fed_acc - local_acc if (fed_acc == fed_acc and local_acc == local_acc) else nan
+
+        metrics.update(
+            trained_on       = n,
+            trained          = trained,
+            num_events       = num_events,
+            epoch_losses     = epoch_losses,
+            sir_s            = sir.S,
+            sir_i            = sir.I,
+            sir_r            = sir.R,
+            local_triage_acc = local_acc,
+            fl_gain          = fl_gain,
         )
+        return metrics
+
+    def get_weights(self):
+        return self.learner.get_weights()
+
+    def set_weights(self, weights) -> None:
+        self.learner.set_weights(weights)
+
+    def release_model(self) -> None:
+        self.learner.release()
+
+    def try_accept_global(self, global_weights) -> bool:
+        return self.learner.try_accept_global(global_weights)
+
+    def evaluate(self, events=None) -> dict:
+        events = events if events is not None else self.clinic_queue.processed
+        return self.learner.evaluate(events)
 
     def set_disease_strategy(self, strategy: DiseaseStrategy) -> None:
         """Hot-swap the transmission strategy at runtime."""
@@ -536,10 +624,6 @@ class WorldEngine:
                     'text':  self._generate_opening(ag, event=c),
                 })
             self.clinic_queue.enqueue(c)
-
-        # FL round every 7 days
-        if self.current_day % 7 == 0:
-            self.run_fl_round()
 
         # Log file daily header (clinic details written after processing)
         sir = self.sir_model

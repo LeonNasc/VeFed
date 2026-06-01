@@ -17,7 +17,6 @@ Modes
 -----
   tui        Analytics dashboard (SIR chart, clinic log, agent panels)
   rogue      Roguelike ncurses map view
-  pygame     Pygame town view with moving agents
   fl         Federated LoRA training across N silos (logs to W&B)
 
 Presets (--preset <name>)
@@ -127,19 +126,35 @@ def _make_presets() -> dict[str, RunConfig]:
         # Silo 2: rural clinic   — slow-burn sepsis only, small population, low beta.
         "non-iid": RunConfig(
             mode                = "fl",
-            num_agents          = 80,
-            num_silos           = 3,
+            num_agents          = 300,
+            num_silos           = 5,
             disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 8,
-            local_epochs        = 10,
+            local_epochs        = 3,
+            sim_days            = 2,
             world_configs       = [
-                WorldConfig(num_agents=150, progressions=["Standard Flu", "Mild Corona"],
-                            disease_strategy="Standard Flu", beta_scale=1.3),
-                WorldConfig(num_agents=80,  progressions=["Standard Flu", "Slow Burn"],
+                # All silos see all 3 diseases — non-IID is in the prevalence weights.
+                # S0: Flu-dominant
+                WorldConfig(num_agents=300, progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.55, 0.25, 0.20],
+                            disease_strategy="Standard Flu", beta_scale=1.2),
+                # S1: Corona-dominant
+                WorldConfig(num_agents=300, progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.15, 0.65, 0.20],
                             disease_strategy="Standard Flu", beta_scale=1.0),
-                WorldConfig(num_agents=40,  progressions=["Slow Burn"],
-                            disease_strategy="Standard Flu", beta_scale=0.6),
+                # S2: SlowBurn-dominant
+                WorldConfig(num_agents=300, progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.20, 0.20, 0.60],
+                            disease_strategy="Standard Flu", beta_scale=0.9),
+                # S3: Flu+Corona mixed
+                WorldConfig(num_agents=300, progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.40, 0.45, 0.15],
+                            disease_strategy="Standard Flu", beta_scale=1.1),
+                # S4: Flu+SlowBurn mixed
+                WorldConfig(num_agents=300, progressions=["Standard Flu", "Mild Corona", "Slow Burn"],
+                            disease_weights=[0.35, 0.15, 0.50],
+                            disease_strategy="Standard Flu", beta_scale=0.95),
             ],
         ),
 
@@ -156,7 +171,7 @@ def _make_presets() -> dict[str, RunConfig]:
             disease_strategy    = "Standard Flu",
             end_condition       = "extinction",
             min_events_to_train = 8,
-            local_epochs        = 10,
+            local_epochs        = 3,
             world_configs       = [
                 # Flu-dominant silos (0-3)
                 WorldConfig(num_agents=100, progressions=["Standard Flu"],
@@ -293,7 +308,6 @@ def _wizard() -> RunConfig:
         choices=[
             questionary.Choice("Analytics TUI  — SIR chart · clinic log · agent panels", value="tui"),
             questionary.Choice("Roguelike TUI  — ncurses map view of the world",          value="rogue"),
-            questionary.Choice("Pygame         — visual town with moving agents",          value="pygame"),
             questionary.Choice("FL Training    — federated LoRA training, logs to W&B",   value="fl"),
         ],
         default=cfg.mode,
@@ -527,7 +541,7 @@ def _parse_cli() -> RunConfig:
     )
     p.add_argument("--preset", choices=list(PRESET_DESCRIPTIONS), default=None,
                    help="Load a named preset; other flags override individual fields")
-    p.add_argument("--mode", choices=["tui", "rogue", "pygame", "fl", "centralized", "compare"], default=None)
+    p.add_argument("--mode", choices=["tui", "rogue", "fl", "centralized", "compare"], default=None)
     p.add_argument("--agents",   type=int, default=None)
     p.add_argument("--seed",     type=int, default=None)
     p.add_argument("--progressions", nargs="+", default=None,
@@ -677,9 +691,6 @@ def _launch(cfg: RunConfig) -> None:
         from ui.rogue_tui import RogueTUI
         curses.wrapper(lambda s: RogueTUI(s, world).run())
 
-    elif cfg.mode == "pygame":
-        from ui.pygame_ui import PygameUI
-        PygameUI(world).run()
 
 
 def _make_fl_cfg(cfg: RunConfig) -> "FLTrainConfig":
