@@ -440,14 +440,15 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         silo.set_weights(global_weights)
 
     run.finish()
-    _report.write(_report_path)
 
-    # ── Save embedding evolution plots (skipped when tracker is shared) ───────
+    # ── Embedding plots — generate before writing report so they embed inline ──
     if _own_tracker:
         print("  [embed] Generating evolution plots…")
         embed_plots = _tracker.save_plots()
         for p in embed_plots:
             print(f"  [embed] {p.resolve()}")
+
+    _report.write(_report_path, tracker=_tracker if _own_tracker else None)
 
     run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
     print(f"\nTraining complete. W&B: {run_ref}")
@@ -667,13 +668,14 @@ def run_centralized_training(
             break
 
     run.finish()
-    _report.write(_report_path)
-    print(f"Report: {_report_path.resolve()}")
 
     if _own_tracker:
         plots = _tracker.save_plots()
         for p in plots:
             print(f"  [embed] {p.resolve()}")
+
+    _report.write(_report_path, tracker=_tracker if _own_tracker else None)
+    print(f"Report: {_report_path.resolve()}")
 
     return trainer
 

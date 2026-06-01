@@ -292,7 +292,7 @@ class EmbeddingTracker:
                       if k.startswith("silo_") and k.endswith("_fed"))
         labels  = np.array(self._probe_labels)
 
-        # Colour maps
+        # Colour maps — infectious (warm) vs non-infectious (cool) split palettes
         icd3_list   = [(lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3])
                        for lbl in self._probe_labels]
         tier_list   = [(lbl.rsplit(" / ", 1)[-1] if " / " in lbl else "unknown")
@@ -300,10 +300,9 @@ class EmbeddingTracker:
 
         unique_icd3 = sorted(set(icd3_list))
         unique_tier = ["home rest", "treat", "hospitalise"]
-        cmap_icd  = plt.cm.get_cmap("tab10", len(unique_icd3))
-        cmap_tier = plt.cm.get_cmap("Set1",  3)
-        icd_color  = {icd:  cmap_icd(i)  for i, icd  in enumerate(unique_icd3)}
-        tier_color = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
+        icd_color   = _build_icd_color_map(unique_icd3)
+        cmap_tier   = plt.cm.get_cmap("Set2", 3)
+        tier_color  = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
 
         saved: list[Path] = []
 
@@ -330,6 +329,118 @@ class EmbeddingTracker:
                                                icd_color, tier_list, tier_color, plt))
 
         return [p for p in saved if p is not None]
+
+    def as_html_imgs(self) -> dict[str, str]:
+        """
+        Generate all embedding plots and return as {plot_name: <img> tag} dict.
+        Plots are encoded as base64 PNGs — no files written.
+        Used by RunReport to embed embedding visualisations inline.
+        """
+        if not self._snapshots:
+            return {}
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return {}
+
+        rounds  = sorted(self._snapshots)
+        n_silos = sum(1 for k in self._snapshots[rounds[0]]
+                      if k.startswith("silo_") and k.endswith("_fed"))
+        icd3_list = [(lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3])
+                     for lbl in self._probe_labels]
+        tier_list = [(lbl.rsplit(" / ", 1)[-1] if " / " in lbl else "unknown")
+                     for lbl in self._probe_labels]
+        unique_icd3 = sorted(set(icd3_list))
+        unique_tier = ["home rest", "treat", "hospitalise"]
+        icd_color   = _build_icd_color_map(unique_icd3)
+        cmap_tier   = plt.cm.get_cmap("Set2", 3)
+        tier_color  = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
+
+        result: dict[str, str] = {}
+
+        # Evolution plots (CLS and logit space)
+        for space, label in [("cls", "CLS hidden states"), ("logits", "logit space")]:
+            n    = len(rounds)
+            cols = min(5, n)
+            rows = (n + cols - 1) // cols
+            fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.2, rows * 3.0),
+                                     constrained_layout=True)
+            axes_flat = np.array(axes).flatten() if n > 1 else [axes]
+            _style_fig(fig, axes_flat)
+            for ax_i, rnd in enumerate(rounds):
+                ax = axes_flat[ax_i]
+                data = self._snapshots[rnd]["global"][space]
+                coords = _project(data)
+                self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt,
+                                    annotate=(rnd >= 3))
+                ax.set_title(f"Round {rnd}", fontsize=8, color="#212529")
+            for ax in axes_flat[len(rounds):]:
+                ax.set_visible(False)
+            _add_legend(fig, unique_icd3, icd_color)
+            fig.suptitle(f"Global model evolution — {label}\n(UMAP per round)",
+                         fontsize=10, color="#212529")
+            result[f"evolution_{space}"] = _fig_to_img_tag(fig, plt)
+
+        # Final all models
+        snap     = self._snapshots[rounds[-1]]
+        mod_keys = [k for k in ["global"] + [f"silo_{i}_fed" for i in range(n_silos)]
+                    if k in snap]
+        cols     = len(mod_keys)
+        if cols:
+            fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5),
+                                     constrained_layout=True)
+            if cols == 1:
+                axes = axes.reshape(2, 1)
+            _style_fig(fig, axes.flat)
+            row_labels = ["by disease (ICD)", "by management tier"]
+            for col, key in enumerate(mod_keys):
+                coords = _project(snap[key]["logits"])
+                for row, (groups, cmap) in enumerate([(unique_icd3, icd_color),
+                                                       (unique_tier, tier_color)]):
+                    ax = axes[row, col]
+                    self._scatter_panel(ax, coords,
+                                        icd3_list if row == 0 else tier_list,
+                                        groups, cmap, plt, annotate=(row == 0))
+                    if col == 0:
+                        ax.set_ylabel(row_labels[row], fontsize=8, color="#212529")
+                    if row == 0:
+                        lbl = "Global" if key == "global" else f"Silo {key.split('_')[1]}"
+                        ax.set_title(lbl, fontsize=8, color="#212529")
+            _add_legend(fig, unique_icd3, icd_color, ncol=4)
+            fig.suptitle(f"Round {rounds[-1]} — all federated models (logit-space UMAP)",
+                         fontsize=10, color="#212529")
+            result["final_all_models"] = _fig_to_img_tag(fig, plt)
+
+        # FL gain: fed vs local per silo
+        if n_silos:
+            fig, axes = plt.subplots(2, n_silos, figsize=(n_silos * 3.0, 6.5),
+                                     constrained_layout=True)
+            if n_silos == 1:
+                axes = axes.reshape(2, 1)
+            _style_fig(fig, axes.flat)
+            for col, i in enumerate(range(n_silos)):
+                for row, suffix in enumerate(["_fed", "_local"]):
+                    key = f"silo_{i}{suffix}"
+                    if key not in snap:
+                        axes[row, col].set_visible(False)
+                        continue
+                    ax = axes[row, col]
+                    self._scatter_panel(ax, _project(snap[key]["logits"]),
+                                        icd3_list, unique_icd3, icd_color, plt, annotate=True)
+                    if col == 0:
+                        ax.set_ylabel("Federated" if row == 0 else "Local-only",
+                                      fontsize=8, color="#212529")
+                    if row == 0:
+                        ax.set_title(f"Silo {i}", fontsize=8, color="#212529")
+            _add_legend(fig, unique_icd3, icd_color, ncol=4)
+            fig.suptitle(f"Round {rounds[-1]} — federated vs local-only (logit-space UMAP)",
+                         fontsize=10, color="#212529")
+            result["fl_gain"] = _fig_to_img_tag(fig, plt)
+
+        return result
 
     def _scatter_panel(self, ax, coords, group_list, unique_groups, color_map, plt,
                        annotate: bool = False):
@@ -395,24 +506,24 @@ class EmbeddingTracker:
         fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.2, rows * 3.0),
                                  constrained_layout=True)
         axes_flat = np.array(axes).flatten() if n > 1 else [axes]
+        _style_fig(fig, axes_flat)
 
         for ax_i, rnd in enumerate(rounds):
             ax   = axes_flat[ax_i]
             data = self._snapshots[rnd]["global"][space]
             coords = _project(data)
-            # Annotate centroids only from round 3 onwards — before that the
-            # clusters are not stable enough for centroid labels to be meaningful.
             self._scatter_panel(ax, coords, group_list, unique_groups, color_map, plt,
                                 annotate=(rnd >= 3))
-            ax.set_title(f"Round {rnd}", fontsize=8)
+            ax.set_title(f"Round {rnd}", fontsize=8, color="#212529")
 
         for ax in axes_flat[len(rounds):]:
             ax.set_visible(False)
 
         _add_legend(fig, unique_groups, color_map)
-        fig.suptitle(f"Global model evolution — {title_suffix}\n(UMAP per round)", fontsize=10)
+        fig.suptitle(f"Global model evolution — {title_suffix}\n(UMAP per round)",
+                     fontsize=10, color="#212529")
         path = self.output_dir / fname
-        fig.savefig(path, dpi=130)
+        fig.savefig(path, dpi=130, facecolor=fig.get_facecolor())
         plt.close(fig)
         return path
 
@@ -427,6 +538,7 @@ class EmbeddingTracker:
         fig, axes = plt.subplots(2, cols, figsize=(cols * 3.0, 6.5), constrained_layout=True)
         if cols == 1:
             axes = axes.reshape(2, 1)
+        _style_fig(fig, axes.flat)
 
         row_labels = ["by disease (ICD)", "by management tier"]
 
@@ -442,15 +554,16 @@ class EmbeddingTracker:
                 self._scatter_panel(ax, coords, group_list, groups, cmap, plt,
                                     annotate=(row == 0))
                 if col == 0:
-                    ax.set_ylabel(row_labels[row], fontsize=8)
+                    ax.set_ylabel(row_labels[row], fontsize=8, color="#212529")
                 if row == 0:
                     label = "Global" if key == "global" else f"Silo {key.split('_')[1]}"
-                    ax.set_title(label, fontsize=8)
+                    ax.set_title(label, fontsize=8, color="#212529")
 
         _add_legend(fig, unique_icd3, icd_color, ncol=4)
-        fig.suptitle(f"Round {last_round} — all federated models (logit-space UMAP)", fontsize=10)
+        fig.suptitle(f"Round {last_round} — all federated models (logit-space UMAP)",
+                     fontsize=10, color="#212529")
         path = self.output_dir / "final_all_models.png"
-        fig.savefig(path, dpi=130)
+        fig.savefig(path, dpi=130, facecolor=fig.get_facecolor())
         plt.close(fig)
         return path
 
@@ -463,6 +576,7 @@ class EmbeddingTracker:
                                  constrained_layout=True)
         if n_silos == 1:
             axes = axes.reshape(2, 1)
+        _style_fig(fig, axes.flat)
 
         for col, i in enumerate(range(n_silos)):
             for row, suffix in enumerate(["_fed", "_local"]):
@@ -475,14 +589,16 @@ class EmbeddingTracker:
                 self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt,
                                     annotate=True)
                 if col == 0:
-                    ax.set_ylabel("Federated" if row == 0 else "Local-only", fontsize=8)
+                    ax.set_ylabel("Federated" if row == 0 else "Local-only",
+                                  fontsize=8, color="#212529")
                 if row == 0:
-                    ax.set_title(f"Silo {i}", fontsize=8)
+                    ax.set_title(f"Silo {i}", fontsize=8, color="#212529")
 
         _add_legend(fig, unique_icd3, icd_color, ncol=4)
-        fig.suptitle(f"Round {last_round} — federated vs local-only (logit-space UMAP)", fontsize=10)
+        fig.suptitle(f"Round {last_round} — federated vs local-only (logit-space UMAP)",
+                     fontsize=10, color="#212529")
         path = self.output_dir / "fl_gain_final.png"
-        fig.savefig(path, dpi=130)
+        fig.savefig(path, dpi=130, facecolor=fig.get_facecolor())
         plt.close(fig)
         return path
 
@@ -505,6 +621,7 @@ class EmbeddingTracker:
                                  constrained_layout=True)
         if cols == 1:
             axes = axes.reshape(2, 1)
+        _style_fig(fig, axes.flat)
 
         row_labels = ["Federated (global)", "Centralized (oracle)"]
         for col, rnd in enumerate(cmp_rounds):
@@ -515,22 +632,21 @@ class EmbeddingTracker:
                 self._scatter_panel(ax, coords, icd3_list, unique_icd3, icd_color, plt,
                                     annotate=(rnd == cmp_rounds[-1]))
                 if col == 0:
-                    ax.set_ylabel(row_labels[row], fontsize=8)
+                    ax.set_ylabel(row_labels[row], fontsize=8, color="#212529")
                 if row == 0:
-                    ax.set_title(f"Round {rnd}", fontsize=8)
+                    ax.set_title(f"Round {rnd}", fontsize=8, color="#212529")
 
         _add_legend(fig, unique_icd3, icd_color, ncol=4)
-        fig.suptitle("Federated vs Centralized — logit-space UMAP per round", fontsize=10)
+        fig.suptitle("Federated vs Centralized — logit-space UMAP per round",
+                     fontsize=10, color="#212529")
         path = self.output_dir / "comparison_fed_vs_centralized.png"
-        fig.savefig(path, dpi=130)
+        fig.savefig(path, dpi=130, facecolor=fig.get_facecolor())
         plt.close(fig)
         return path
 
 
 # ── Label helpers ─────────────────────────────────────────────────────────────
 
-# Human-readable names for the legend and centroid annotations.
-# Keyed by ICD-3 prefix; falls back to the raw code if not found.
 ICD3_NAMES: dict[str, str] = {
     "A41": "Sepsis",
     "A99": "Benchmark fever",
@@ -544,33 +660,76 @@ ICD3_NAMES: dict[str, str] = {
 }
 
 # Infectious diseases use filled circles; non-infectious use triangles.
-# Makes the infectious / non-infectious split readable without colour alone.
 ICD3_MARKER: dict[str, str] = {
-    "A41": "o",   # Sepsis — infectious
-    "A99": "o",   # Benchmark fever — infectious
-    "J11": "o",   # Flu — infectious
-    "U07": "o",   # Corona — infectious
-    "F41": "^",   # Anxiety — non-infectious
-    "M54": "^",   # Back pain — non-infectious
-    "R51": "^",   # Headache — non-infectious
-    "R53": "^",   # Fatigue — non-infectious
-    "Z87": "^",   # Hypertension — non-infectious
+    "A41": "o", "A99": "o", "J11": "o", "U07": "o",   # infectious
+    "F41": "^", "M54": "^", "R51": "^", "R53": "^", "Z87": "^",  # non-infectious
 }
+
+# Warm palette for infectious diseases; cool palette for non-infectious.
+# Different hue families make the split instantly readable.
+_INFECTIOUS_COLORS: dict[str, str] = {
+    "J11": "#e63946",   # Flu            — vivid red
+    "U07": "#f4a261",   # Corona         — amber orange
+    "A41": "#9b2226",   # Sepsis         — deep crimson
+    "A99": "#ff6b9d",   # Benchmark fever — hot pink
+}
+_NON_INFECTIOUS_COLORS: dict[str, str] = {
+    "F41": "#2a9d8f",   # Anxiety        — teal
+    "M54": "#52b788",   # Back pain      — sage green
+    "R51": "#4361ee",   # Headache       — indigo
+    "R53": "#118ab2",   # Fatigue        — steel blue
+    "Z87": "#7b2d8b",   # Hypertension   — violet
+}
+
+
+def _build_icd_color_map(unique_icd3: list) -> dict:
+    """Return per-ICD3 color using warm palette for infectious, cool for non-infectious."""
+    base = {**_INFECTIOUS_COLORS, **_NON_INFECTIOUS_COLORS}
+    # Fallback for any unexpected codes: cycle through tab10
+    import matplotlib.pyplot as plt
+    tab = plt.cm.get_cmap("tab10")
+    extras = [icd for icd in unique_icd3 if icd not in base]
+    for i, icd in enumerate(extras):
+        base[icd] = tab(i % 10)
+    return {icd: base[icd] for icd in unique_icd3}
+
+
+def _style_fig(fig, axes_iter) -> None:
+    """Apply light-mode styling to a figure and its axes."""
+    fig.patch.set_facecolor("white")
+    for ax in axes_iter:
+        ax.set_facecolor("#f8f9fa")
+        ax.tick_params(colors="#495057", labelsize=7)
+        ax.spines[:].set_color("#ced4da")
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.5)
 
 
 def _add_legend(fig, unique_groups: list, color_map: dict, ncol: int = 7) -> None:
     import matplotlib.patches as mpatches
-    patches = [
-        mpatches.Patch(color=color_map[g], label=ICD3_NAMES.get(g, g))
-        for g in unique_groups
-    ]
-    fig.legend(handles=patches, loc="lower center", ncol=min(ncol, len(unique_groups)),
-               fontsize=8, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
+    infectious     = [g for g in unique_groups if g in _INFECTIOUS_COLORS]
+    non_infectious = [g for g in unique_groups if g in _NON_INFECTIOUS_COLORS]
+    other          = [g for g in unique_groups if g not in _INFECTIOUS_COLORS
+                      and g not in _NON_INFECTIOUS_COLORS]
+    ordered = infectious + non_infectious + other
+
+    patches = []
+    for g in ordered:
+        marker = ICD3_MARKER.get(g, "o")
+        label  = ICD3_NAMES.get(g, g)
+        # Add ○/△ marker hint to label
+        hint = " ●" if marker == "o" else " ▲"
+        patches.append(mpatches.Patch(color=color_map[g], label=label + hint))
+
+    fig.legend(handles=patches, loc="lower center", ncol=min(ncol, len(patches)),
+               fontsize=8, framealpha=0.95, labelcolor="#212529",
+               facecolor="white", edgecolor="#ced4da",
+               bbox_to_anchor=(0.5, -0.02))
 
 
 def _annotate_centroids(ax, coords: "np.ndarray", group_list: list,
                         unique_groups: list, color_map: dict) -> None:
-    """Draw a readable name at the centroid of each ICD cluster."""
+    """Draw name at each ICD cluster centroid, styled for light background."""
     import numpy as np
     for grp in unique_groups:
         mask = np.array([g == grp for g in group_list])
@@ -582,6 +741,17 @@ def _annotate_centroids(ax, coords: "np.ndarray", group_list: list,
             cx, cy, name,
             fontsize=6, ha="center", va="center", fontweight="bold",
             color="white",
-            bbox=dict(boxstyle="round,pad=0.15", fc=color_map[grp],
-                      ec="none", alpha=0.80),
+            bbox=dict(boxstyle="round,pad=0.18", fc=color_map[grp],
+                      ec="none", alpha=0.88),
         )
+
+
+def _fig_to_img_tag(fig, plt, dpi: int = 130) -> str:
+    """Encode a matplotlib figure as a base64 <img> tag and close it."""
+    import base64, io
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    data = base64.b64encode(buf.getvalue()).decode()
+    return f'<img src="data:image/png;base64,{data}" style="max-width:100%;margin:.5em 0">'
