@@ -145,3 +145,9 @@ STRATEGIES: dict[str, DiseaseStrategy] = {
         SlowBurnStrategy(),
     ]
 }
+
+# Alias so presets using the new disease names resolve correctly.
+# Influenza → StandardFluStrategy (moderate-spread baseline)
+# Bacterial Pneumonia → SlowBurnStrategy (lower transmissibility, slower progression)
+STRATEGIES["Influenza"]           = StandardFluStrategy()
+STRATEGIES["Bacterial Pneumonia"] = SlowBurnStrategy()

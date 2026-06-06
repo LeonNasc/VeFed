@@ -26,25 +26,23 @@ from typing import Optional
 
 import numpy as np
 
-from fl.learner import CANONICAL_ICD_CODES, build_label_map
+from fl.learner import build_label_map, _split_label
 from simulation.world import WorldEngine
 from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 
 
 @dataclass
 class CentralizedRoundMetrics:
-    round_num:       int
-    loss:            float
-    triage_acc:      float
-    diag_acc:        float
-    combined_acc:    float
-    triage_macro_f1: float
-    danger_rate:     float
-    num_events:      int
-    trained_on:      int
-    epoch_losses:    list[float]
-    elapsed:         float
-    all_done:        bool = False
+    round_num:   int
+    loss:        float
+    triage_acc:  float
+    diag_acc:    float
+    danger_rate: float
+    num_events:  int
+    trained_on:  int
+    epoch_losses: list[float]
+    elapsed:     float
+    all_done:    bool = False
 
 
 class CentralizedTrainer:
@@ -71,26 +69,32 @@ class CentralizedTrainer:
         lr: float = 1e-4,
         min_events_to_train: int = 10,
         sim_days: int = 7,
+        train_sample_cap: int = 512,
+        device: Optional[str] = None,
     ):
-        import torch
+        from transformers import AutoTokenizer
         self.silos               = silos
         self._sim_days           = sim_days
         self.local_epochs        = local_epochs
         self.batch_size          = batch_size
         self.lr                  = lr
         self.min_events_to_train = min_events_to_train
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.train_sample_cap    = train_sample_cap
+        # Default CPU: same rationale as FLLearner (Ollama holds the GPU).
+        self.device = device if device is not None else "cpu"
 
-        self._label2id, self._id2label = build_label_map(CANONICAL_ICD_CODES)
+        self._label2id, self._id2label = build_label_map()
 
         cfg = lora_config or LoRAConfig()
         if cfg.num_labels != len(self._label2id):
             from dataclasses import replace
             cfg = replace(cfg, num_labels=len(self._label2id))
         self.lora_config = cfg
+        self._tokenizer  = AutoTokenizer.from_pretrained(cfg.model_name_or_path)
 
         self._model        = None   # lazy-built
         self._pool_buffer: list = []   # accumulated events from all silos
+        self._pool_rng = __import__("random").Random(42)
 
     @property
     def model(self):
@@ -119,11 +123,14 @@ class CentralizedTrainer:
           2. Pool all new events into the shared buffer
           3. Train one model on the full buffer
           4. Evaluate on this round's new events
+
+        NOTE: does NOT release the model — the model must persist across rounds
+        so that training accumulates. The caller (run_centralized_training) is
+        responsible for calling release_model() once after all rounds finish.
         """
         import torch
         from torch.optim import AdamW
         from torch.utils.data import DataLoader, TensorDataset
-        from transformers import AutoTokenizer
 
         t0 = time.time()
 
@@ -137,26 +144,34 @@ class CentralizedTrainer:
                     if silo.is_done:
                         break
                 round_events.extend(silo.clinic_queue.processed[start:])
+                # Trim processed archive to prevent unbounded memory growth;
+                # round_events already holds references to the new events.
+                del silo.clinic_queue.processed[:]
 
         all_done = all(s.is_done for s in self.silos)
 
-        # ── Step 2: extend shared pool ────────────────────────────────────────
+        # ── Step 2: extend shared pool, capped at 4× train_sample_cap ────────
         self._pool_buffer.extend(round_events)
+        max_pool = self.train_sample_cap * 4
+        if len(self._pool_buffer) > max_pool:
+            self._pool_buffer = self._pool_buffer[-max_pool:]
 
         # ── Step 3: evaluate BEFORE training (on new events only) ────────────
         eval_metrics = self._evaluate(round_events) if round_events else {}
 
-        # ── Step 4: train on full pool ────────────────────────────────────────
+        # ── Step 4: train on a stratified sample from the pool ───────────────
         trained_on   = 0
         epoch_losses: list[float] = []
 
         if len(self._pool_buffer) >= self.min_events_to_train:
-            texts, labels = self._build_dataset(self._pool_buffer)
+            sample = (
+                self._pool_rng.sample(self._pool_buffer, self.train_sample_cap)
+                if len(self._pool_buffer) > self.train_sample_cap
+                else self._pool_buffer
+            )
+            texts, labels = self._build_dataset(sample)
             if texts:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    self.lora_config.model_name_or_path
-                )
-                enc = tokenizer(
+                enc = self._tokenizer(
                     texts, padding=True, truncation=True,
                     max_length=128, return_tensors="pt",
                 )
@@ -187,21 +202,18 @@ class CentralizedTrainer:
                     epoch_losses.append(sum(batch_losses) / len(batch_losses))
 
                 trained_on = len(texts)
-        self.release_model()
 
         return CentralizedRoundMetrics(
-            round_num       = -1,   # caller sets this
-            loss            = epoch_losses[-1] if epoch_losses else float("nan"),
-            triage_acc      = eval_metrics.get("triage_acc",      float("nan")),
-            diag_acc        = eval_metrics.get("diag_acc",        float("nan")),
-            combined_acc    = eval_metrics.get("combined_acc",    float("nan")),
-            triage_macro_f1 = eval_metrics.get("triage_macro_f1", float("nan")),
-            danger_rate     = eval_metrics.get("danger_rate",     float("nan")),
-            num_events      = len(round_events),
-            trained_on      = trained_on,
-            epoch_losses    = epoch_losses,
-            elapsed         = time.time() - t0,
-            all_done        = all_done,
+            round_num    = -1,   # caller sets this
+            loss         = epoch_losses[-1] if epoch_losses else float("nan"),
+            triage_acc   = eval_metrics.get("triage_acc",  float("nan")),
+            diag_acc     = eval_metrics.get("diag_acc",    float("nan")),
+            danger_rate  = eval_metrics.get("danger_rate", float("nan")),
+            num_events   = len(round_events),
+            trained_on   = trained_on,
+            epoch_losses = epoch_losses,
+            elapsed      = time.time() - t0,
+            all_done     = all_done,
         )
 
     # ── Private helpers ───────────────────────────────────────────────────────
@@ -221,15 +233,12 @@ class CentralizedTrainer:
 
     def _evaluate(self, events: list) -> dict:
         import torch
-        from collections import defaultdict
-        from transformers import AutoTokenizer
 
         texts, labels = self._build_dataset(events)
         if not texts:
             return {}
 
-        tokenizer = AutoTokenizer.from_pretrained(self.lora_config.model_name_or_path)
-        enc = tokenizer(
+        enc = self._tokenizer(
             texts, padding=True, truncation=True,
             max_length=128, return_tensors="pt",
         )
@@ -246,44 +255,24 @@ class CentralizedTrainer:
         preds = out.logits.argmax(dim=-1).cpu().tolist()
         n = len(preds)
 
-        icd_cat = mgmt_ok = combined = danger = 0
-        triage_tp: dict[str, int] = defaultdict(int)
-        triage_fp: dict[str, int] = defaultdict(int)
-        triage_fn: dict[str, int] = defaultdict(int)
+        sev_ok = diag_ok = danger = n_severe_true = 0
 
         for pred_idx, true_idx in zip(preds, labels):
             pred_lbl = self._id2label[pred_idx]
             true_lbl = self._id2label[true_idx]
-            pred_icd, pred_mgmt = pred_lbl.rsplit(" / ", 1)
-            true_icd, true_mgmt = true_lbl.rsplit(" / ", 1)
+            pred_disease, pred_sev = _split_label(pred_lbl)
+            true_disease, true_sev = _split_label(true_lbl)
 
-            cat  = pred_icd[:3] == true_icd[:3]
-            mgmt = pred_mgmt == true_mgmt
-            icd_cat  += cat
-            mgmt_ok  += mgmt
-            combined += (cat and mgmt)
+            sev_ok  += pred_sev  == true_sev
+            diag_ok += pred_disease == true_disease
 
-            if mgmt:
-                triage_tp[true_mgmt] += 1
-            else:
-                triage_fp[pred_mgmt] += 1
-                triage_fn[true_mgmt] += 1
-                if true_mgmt == "hospitalise" and pred_mgmt == "home rest":
+            if true_sev == "severe":
+                n_severe_true += 1
+                if pred_sev not in ("severe",) or pred_lbl == "non-infectious":
                     danger += 1
 
-        tiers = ("home rest", "treat", "hospitalise")
-        f1s = []
-        for tier in tiers:
-            tp = triage_tp[tier]; fp = triage_fp[tier]; fn = triage_fn[tier]
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0)
-        n_hosp = triage_tp["hospitalise"] + triage_fn["hospitalise"]
-
         return {
-            "triage_acc":      mgmt_ok  / n,
-            "diag_acc":        icd_cat  / n,
-            "combined_acc":    combined / n,
-            "triage_macro_f1": sum(f1s) / len(f1s),
-            "danger_rate":     danger / n_hosp if n_hosp > 0 else float("nan"),
+            "triage_acc": sev_ok  / n,
+            "diag_acc":   diag_ok / n,
+            "danger_rate": danger / n_severe_true if n_severe_true > 0 else float("nan"),
         }

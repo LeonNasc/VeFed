@@ -20,14 +20,14 @@ from typing import Optional, TextIO
 
 from simulation.strategies import DiseaseStrategy, StandardFluStrategy
 from simulation.progression import (
-    DiseaseProgressionStrategy, StandardFluProgression,
+    DiseaseProgressionStrategy, InfluenzaProgression,
     PROGRESSION_STRATEGIES,
 )
 from simulation.symptom_language import Personality
 from simulation.models import (
     Agent, DailySchedule, DiseaseCloud,
     DiagnosticEvent, HealthStatus, Location, LocationType, SIRModel,
-    REFRACTORY_DAYS,
+    REFRACTORY_DAYS, severity_bucket,
 )
 from simulation.end_conditions import EndCondition
 
@@ -194,6 +194,36 @@ class WorldEngine:
     TICKS_PER_DAY = 288
     BASE_BETA     = 1.50   # baseline transmission rate (scaled by strategy)
 
+    # Meaningful close contacts per day per location type.
+    # ~2.5× POLYMOD community baseline (Mossong et al. 2008) — scaled up for a
+    # closed simulated population where the same agents interact daily, giving
+    # higher within-group secondary attack rates than community-level surveys
+    # capture. Targets R0 ≈ 1.5 for a self-sustaining epidemic arc.
+    DAILY_CONTACTS = {
+        LocationType.HOME:      17,
+        LocationType.WORK:      27,
+        LocationType.THIRD:     33,
+        LocationType.COMMUTING: 11,
+        LocationType.HOSPITAL:  13,
+    }
+
+    # Expected ticks per day an agent spends at each location type (from DailySchedule).
+    # Used to normalise the per-tick exposure so that daily total = beta * prevalence
+    # * daily_contacts / TICKS_PER_DAY regardless of how many ticks are spent there.
+    _TICKS_AT_LOC = {
+        LocationType.HOME:      120,   # 0-71 (sleep) + 240-287 (evening)
+        LocationType.WORK:       84,   # 96-179
+        LocationType.THIRD:      36,   # 204-239
+        LocationType.COMMUTING:  48,   # 72-95 + 180-203 (2 h each way)
+        LocationType.HOSPITAL:  288,   # full day
+    }
+
+    # During commute, agents randomly encounter this many strangers from the full
+    # commute pool — simulates a bus/metro carriage rather than a fixed social group.
+    # Random sampling provides cross-household/-workplace mixing that helps the
+    # epidemic bridge clusters.
+    COMMUTE_SAMPLE_SIZE = 25
+
     def __init__(self, num_agents: int = 30, seed: int = 0,
                  disease_strategy: DiseaseStrategy | None = None,
                  progression_strategy: DiseaseProgressionStrategy | None = None,
@@ -215,7 +245,10 @@ class WorldEngine:
                  local_epochs: int = 3,
                  batch_size: int = 8,
                  lr: float = 1e-4,
-                 replay_buffer_size: int = 2048):
+                 dataset=None,           # fl.dataset.SiloDataset | None
+                 train_sample_cap: int = 512,
+                 replay_buffer_size: int = 2048,
+                 training_device: str = "cpu"):
         self._seed   = seed
         self._rng    = random.Random(seed)
         self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
@@ -230,7 +263,7 @@ class WorldEngine:
         elif progression_strategy:
             self.progressions = [progression_strategy]
         else:
-            self.progressions = [StandardFluProgression()]
+            self.progressions = [InfluenzaProgression()]
         self.progression = self.progressions[0]  # backward-compat alias
 
         # ── Generate world via WFC ──────────────────────────────────────
@@ -315,9 +348,13 @@ class WorldEngine:
             local_epochs        = local_epochs,
             batch_size          = batch_size,
             lr                  = lr,
+            dataset             = dataset,
+            train_sample_cap    = train_sample_cap,
             replay_buffer_size  = replay_buffer_size,
+            device              = training_device,
         )
-        self._learner            = None
+        self._learner            = None   # doctor (disease classifier)
+        self._nurse_learner      = None   # nurse  (severity classifier)
         self.last_round_events:  list = []
 
         # Daily log file — appended at end of each simulated day
@@ -386,9 +423,29 @@ class WorldEngine:
                 1 for aid in loc.agents_present
                 if self.agents_by_id[aid].is_infectious
             )
-            prevalence = n_infectious / n_present if n_present > 0 else 0.0
-            beta = self.BASE_BETA * self._beta_scale * self.strategy.transmission_rate(agent.current_type)
-            eps = (beta * prevalence + loc.ambient_exposure()) / self.TICKS_PER_DAY
+            if agent.current_type == LocationType.COMMUTING:
+                # Random encounter model: sample a small group from the commute pool
+                # rather than using all present — simulates a metro/bus carriage and
+                # provides cross-household mixing that bridges household clusters.
+                pool = [aid for aid in loc.agents_present if aid != agent.id]
+                k    = min(self.COMMUTE_SAMPLE_SIZE, len(pool))
+                if k > 0:
+                    sample      = self._rng.sample(pool, k)
+                    n_inf_samp  = sum(1 for aid in sample
+                                     if self.agents_by_id[aid].is_infectious)
+                    prevalence  = n_inf_samp / k
+                else:
+                    prevalence = 0.0
+            else:
+                prevalence = n_infectious / n_present if n_present > 0 else 0.0
+
+            beta           = self.BASE_BETA * self._beta_scale * self.strategy.transmission_rate(agent.current_type)
+            daily_contacts = self.DAILY_CONTACTS.get(agent.current_type, 8)
+            ticks_at_loc   = self._TICKS_AT_LOC.get(agent.current_type, 72)
+            # Per-tick contribution normalised so daily total = beta * prevalence
+            # * daily_contacts / TICKS_PER_DAY (independent of ticks spent here).
+            eps = (beta * prevalence * daily_contacts / ticks_at_loc
+                   + loc.ambient_exposure()) / self.TICKS_PER_DAY
             agent.update_health(eps)
 
         # Random disease-cloud generation (stochastic events)
@@ -427,7 +484,9 @@ class WorldEngine:
                 ev = agent.build_diagnostic_event()
                 # Q26: mask real ICD for incubating patients when reveal_incubating_icd=False
                 if not self.reveal_incubating_icd and ev.severity == 0.0 and ev.days_infected > 0:
-                    ev.ground_truth = "unknown / home rest"
+                    ev.ground_truth = "unknown/mild"
+                    ev.gt_disease   = "unknown"
+                    ev.gt_severity  = "mild"
                 cases.append(ev)
         return cases
 
@@ -445,16 +504,41 @@ class WorldEngine:
 
     @property
     def learner(self):
-        """Lazy-create FLLearner on first access. Imports torch only when needed."""
+        """Diagnostic doctor learner (disease classifier, 4-class)."""
         if self._learner is None:
             if self._lora_config is None:
                 raise RuntimeError("WorldEngine: lora_config not set — not FL-enabled")
             from fl.learner import FLLearner
             self._learner = FLLearner(
-                lora_config=self._lora_config,
+                lora_config  = self._lora_config,
+                label_space  = "disease",
                 **self._fl_learner_kwargs,
             )
         return self._learner
+
+    @property
+    def nurse_learner(self):
+        """Triage nurse learner (severity classifier, 5-class)."""
+        if self._nurse_learner is None:
+            if self._lora_config is None:
+                raise RuntimeError("WorldEngine: lora_config not set — not FL-enabled")
+            from fl.learner import FLLearner
+            self._nurse_learner = FLLearner(
+                lora_config  = self._lora_config,
+                label_space  = "severity",
+                **self._fl_learner_kwargs,
+            )
+        return self._nurse_learner
+
+    def get_nurse_weights(self):
+        return self.nurse_learner.get_weights()
+
+    def set_nurse_weights(self, weights) -> None:
+        self.nurse_learner.set_weights(weights)
+
+    def release_nurse_model(self) -> None:
+        if self._nurse_learner is not None:
+            self._nurse_learner.release()
 
     def _generate_static_round(self) -> list:
         """
@@ -467,7 +551,6 @@ class WorldEngine:
         can still fire on a horizon limit.
         """
         from simulation.case_table import CaseTable, HealthyCaseTable
-        from simulation.case_table import management_from_vitals
         from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
         from simulation.models import DiagnosticEvent
         from simulation.symptom_language import Personality
@@ -492,8 +575,8 @@ class WorldEngine:
                                         max(incubation + 2, incubation + rise + 3))
 
                 sev  = ct._severity_at_day(day)
-                mgmt = management_from_vitals(ct, day)
-                icd  = getattr(traj, "icd_code", prog.icd_code)
+                disease_name = getattr(traj, 'disease_name', 'unknown')
+                _sev_bucket = severity_bucket(sev)
                 ev = DiagnosticEvent(
                     agent_id      = f"static_{k}",
                     severity      = sev,
@@ -501,7 +584,9 @@ class WorldEngine:
                     days_infected = day,
                     personality   = personality,
                     case_table    = ct,
-                    ground_truth  = f"{icd} / {mgmt}",
+                    ground_truth  = f"{disease_name}/{_sev_bucket}",
+                    gt_disease    = disease_name,
+                    gt_severity   = _sev_bucket,
                     is_background = False,
                 )
             else:
@@ -514,7 +599,9 @@ class WorldEngine:
                     days_infected     = 0,
                     personality       = personality,
                     case_table        = HealthyCaseTable(self._rng),
-                    ground_truth      = f"{complaint.icd_code} / {complaint.management}",
+                    ground_truth      = "non-infectious",
+                    gt_disease        = "non-infectious",
+                    gt_severity       = "discharge",
                     is_background     = True,
                     complaint_context = complaint.prompt_context,
                 )
@@ -528,10 +615,17 @@ class WorldEngine:
 
         return events
 
-    def run_round(self) -> dict:
+    def run_round(self, round_num: int = 0) -> dict:
         """
         One complete FL round: advance sim_days → evaluate → train → return metrics.
         Called by the FL orchestrator (fl/train.py) each round.
+
+        Evaluation order (prequential):
+          1. New events arrive from simulation.
+          2. Current model is evaluated on them BEFORE training (unseen data).
+          3. Events are added to the on-disk dataset and the model is fine-tuned
+             on a stratified sample from the accumulated training split.
+          4. Holdout metrics are logged if a SiloDataset is attached.
         """
         if self.is_done:
             if self.learner._frozen_weights is None:
@@ -557,42 +651,68 @@ class WorldEngine:
                 if self.is_done:
                     break
             events = self.clinic_queue.processed[start:]
+            # Trim processed archive; dataset is maintained on disk by FLLearner.
+            del self.clinic_queue.processed[:start]
 
         self.last_round_events = events
         num_events = len(events)
         sir = self.sir_model
 
-        metrics       = self.learner.evaluate(events)
-        local_metrics = self.learner.evaluate_local(events)
-        local_triage  = local_metrics.get("triage_acc", float("nan"))
-        local_diag    = local_metrics.get("diag_acc",   float("nan"))
+        # Step 1: prequential eval — models haven't seen these events yet
+        metrics        = self.learner.evaluate(events)        # doctor: disease acc
+        local_metrics  = self.learner.evaluate_local(events)
+        nurse_metrics  = self.nurse_learner.evaluate(events)  # nurse: severity acc
+        local_triage   = nurse_metrics.get("triage_acc", float("nan"))
+        local_diag     = local_metrics.get("diag_acc",   float("nan"))
 
+        # Step 2: add to dataset and fine-tune on stratified sample (both models)
         if num_events >= self.learner.min_events_to_train:
-            n, epoch_losses = self.learner.train(events)
-            self.learner.train_local(events)
+            n, epoch_losses = self.learner.train(events, round_num=round_num)
+            self.learner.train_local(events, round_num=round_num)
+            self.nurse_learner.train(events, round_num=round_num)
+            self.nurse_learner.train_local(events, round_num=round_num)
             trained = 1
         else:
             n, epoch_losses = 0, []
             trained = 0
 
+        # Step 3: holdout eval (stable test set, never trained on)
+        holdout_m      = self.learner.evaluate_holdout()
+        nurse_holdout  = self.nurse_learner.evaluate_holdout()
+        holdout_triage = nurse_holdout.get("triage_acc", float("nan"))
+        holdout_diag   = holdout_m.get("diag_acc",   float("nan"))
+        if self.learner.dataset is not None:
+            _ht, _hh = self.learner.dataset.size()
+        else:
+            _ht = _hh = 0
+
         nan = float("nan")
-        fed_triage  = metrics.get("triage_acc", nan)
-        fed_diag    = metrics.get("diag_acc",   nan)
-        fl_gain     = fed_triage - local_triage if (fed_triage == fed_triage and local_triage == local_triage) else nan
-        fl_diag_gain = fed_diag - local_diag   if (fed_diag   == fed_diag   and local_diag   == local_diag)   else nan
+        # triage_acc = nurse fed model; diag_acc = doctor fed model
+        fed_triage   = nurse_metrics.get("triage_acc", nan)
+        fed_diag     = metrics.get("diag_acc",         nan)
+        local_triage_fed = self.nurse_learner.evaluate_local(events).get("triage_acc", nan)
+        fl_gain      = fed_triage - local_triage_fed if (fed_triage == fed_triage and local_triage_fed == local_triage_fed) else nan
+        fl_diag_gain = fed_diag - local_diag         if (fed_diag   == fed_diag   and local_diag       == local_diag)       else nan
+
+        # Merge nurse metrics into output under the primary triage_acc key
+        metrics["triage_acc"] = fed_triage
 
         metrics.update(
-            trained_on       = n,
-            trained          = trained,
-            num_events       = num_events,
-            epoch_losses     = epoch_losses,
-            sir_s            = sir.S,
-            sir_i            = sir.I,
-            sir_r            = sir.R,
-            local_triage_acc = local_triage,
-            local_diag_acc   = local_diag,
-            fl_gain          = fl_gain,
-            fl_diag_gain     = fl_diag_gain,
+            trained_on        = n,
+            trained           = trained,
+            num_events        = num_events,
+            epoch_losses      = epoch_losses,
+            sir_s             = sir.S,
+            sir_i             = sir.I,
+            sir_r             = sir.R,
+            local_triage_acc  = local_triage,
+            local_diag_acc    = local_diag,
+            fl_gain           = fl_gain,
+            fl_diag_gain      = fl_diag_gain,
+            holdout_triage_acc = holdout_triage,
+            holdout_diag_acc   = holdout_diag,
+            dataset_train_n    = _ht,
+            dataset_holdout_n  = _hh,
         )
         return metrics
 
@@ -604,6 +724,7 @@ class WorldEngine:
 
     def release_model(self) -> None:
         self.learner.release()
+        self.release_nurse_model()
 
     def try_accept_global(self, global_weights) -> bool:
         return self.learner.try_accept_global(global_weights)
@@ -790,7 +911,9 @@ class WorldEngine:
                     days_infected     = 0,
                     personality       = agent.personality,
                     case_table        = HealthyCaseTable(self._rng),
-                    ground_truth      = f"{complaint.icd_code} / {complaint.management}",
+                    ground_truth      = "non-infectious",
+                    gt_disease        = "non-infectious",
+                    gt_severity       = "discharge",
                     is_background     = True,
                     complaint_context = complaint.prompt_context,
                 )

@@ -87,7 +87,7 @@ class RunReport:
             "agg_loss":    log.get("aggregated/loss",              float("nan")),
             "agg_triage":  log.get("aggregated/triage_acc",       float("nan")),
             "agg_diag":    log.get("aggregated/diag_acc",         float("nan")),
-            "agg_f1":      log.get("aggregated/triage_macro_f1",  float("nan")),
+            "agg_f1":      log.get("aggregated/danger_rate",       float("nan")),
             "agg_danger":  log.get("aggregated/danger_rate",      float("nan")),
             "n_trained":   int(log.get("aggregated/num_trained",  0)),
         })
@@ -376,12 +376,15 @@ function showTab(name,btn){{
 
 
 def _gt_match(ev) -> bool:
-    """True if the LLM management tier matches ground truth."""
+    """True if the LLM action matches expected action for the ground truth severity."""
     if not ev.ground_truth or not ev.action:
         return False
-    tier_map = {"home rest": "home_recovery", "treat": "resolve", "hospitalise": "hospitalise"}
-    gt_parts = ev.ground_truth.rsplit(" / ", 1)
-    if len(gt_parts) != 2:
-        return False
-    expected_action = tier_map.get(gt_parts[1])
+    # New format: "disease/severity" or "non-infectious"
+    sev_to_action = {"mild": "home_recovery", "moderate": "resolve", "severe": "hospitalise", "none": "home_recovery"}
+    gt = ev.ground_truth
+    if "/" in gt:
+        sev = gt.split("/", 1)[1]
+    else:
+        sev = "none"  # "non-infectious"
+    expected_action = sev_to_action.get(sev)
     return ev.action.value == expected_action

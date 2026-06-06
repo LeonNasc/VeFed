@@ -337,6 +337,46 @@ class DeadlyProgression(DiseaseProgressionStrategy):
         )
 
 
+class InfluenzaProgression(DiseaseProgressionStrategy):
+    name        = "Influenza"
+    icd_code    = "J10.1"
+    description = "Sudden onset, fever+myalgia dominant. Fast spread, clears ~8 days."
+
+    def sample_trajectory(self, rng):
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.55, 0.12, 0.20, 0.82),
+            rise_days             = self._sample(rng, 2.5,  0.5,  1.5,  4.0),
+            decay_rate            = self._sample(rng, 0.17, 0.03, 0.08, 0.30),
+            symptom_sensitivity   = self._sample(rng, 3.5,  0.5,  1.5,  6.0),
+            severity_floor_weight = 0.25,
+            disease_name          = "influenza",
+            icd_code              = self.icd_code,
+            incubation_days       = 2,
+            vital_slopes = {"temp": 2.0, "HR": 1.3, "CRP": 1.5,
+                            "SpO2": 0.3, "RR": 0.6, "BP_sys": 0.8},
+        )
+
+
+class BacterialPneumoniaProgression(DiseaseProgressionStrategy):
+    name        = "Bacterial Pneumonia"
+    icd_code    = "J18.9"
+    description = "Slower onset, respiratory dominant. Less contagious, higher severity, longer recovery."
+
+    def sample_trajectory(self, rng):
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.75, 0.12, 0.35, 0.97),
+            rise_days             = self._sample(rng, 4.5,  0.8,  2.5,  7.0),
+            decay_rate            = self._sample(rng, 0.07, 0.02, 0.03, 0.13),
+            symptom_sensitivity   = self._sample(rng, 3.0,  0.5,  1.5,  5.5),
+            severity_floor_weight = 0.28,
+            disease_name          = "pneumonia",
+            icd_code              = self.icd_code,
+            incubation_days       = 3,
+            vital_slopes = {"SpO2": 2.5, "RR": 2.2, "temp": 1.4, "HR": 1.4,
+                            "WBC": 2.0, "CRP": 2.5, "BP_sys": 1.2},
+        )
+
+
 # ─── Benchmark probe disease ──────────────────────────────────────────────────
 
 class BenchmarkFeverProgression(DiseaseProgressionStrategy):
@@ -436,12 +476,12 @@ def _make_mimic_mock() -> MimicProgression:
 
 PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
     s.name: s for s in [
-        StandardFluProgression(),
-        MildCoronaProgression(),
-        SlowBurnProgression(),
-        _make_mimic_mock(),
+        InfluenzaProgression(),
+        BacterialPneumoniaProgression(),
     ]
 }
-# AggressiveFluProgression, PersistentFluProgression, DeadlyProgression are
-# retained as classes but excluded from the default registry to keep the
-# infectious label space at 3 archetypes (J11.1, U07.2, A41.9).
+# Legacy classes (StandardFluProgression, AggressiveFluProgression,
+# PersistentFluProgression, MildCoronaProgression, SlowBurnProgression,
+# DeadlyProgression) are retained but excluded from the registry.
+# BenchmarkFeverProgression and MimicProgression are also retained for
+# probes/stubs but not in the default registry.

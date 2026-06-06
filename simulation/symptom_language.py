@@ -84,6 +84,49 @@ OPENING_PHRASES = [
 ]
 
 
+INFLUENZA_PHRASES = [
+    # band 0
+    ["I think I'm coming down with something — bit of a fever, muscle aches, dry cough, {days} day(s) now.",
+     "Woke up feeling rough: chills, headache, that fluey feeling. About {days} day(s) in.",
+     "Slight fever, some body aches, scratchy throat. Probably flu starting, {days} day(s).",
+     "I've had a low-grade fever and achy muscles for {days} day(s) — nothing terrible yet.",
+     "Just a touch of flu I think — mild fever, a bit of tiredness, dry throat. {days} day(s)."],
+    # band 1
+    ["I came down quite suddenly with a high fever, muscle aches all over, and a persistent dry cough. {days} day(s) and barely functioning.",
+     "High fever, bad body aches, shivering, exhausted. Classic flu, but quite rough — {days} day(s).",
+     "It hit me fast — fever, chills, splitting headache, muscle pain everywhere. Been in bed {days} day(s).",
+     "I feel rotten. Sudden high fever, severe body aches, dry hacking cough. {days} day(s) now.",
+     "Fever on and off, drenched in sweat, can't get out of bed. This has gone on {days} day(s)."],
+    # band 2
+    ["I'm extremely ill — high fever that won't break, severe muscle aches, bad dry cough, completely wiped out. {days} day(s) and getting worse.",
+     "Worst flu I've ever had. Bedridden, can't eat, spiking temperatures, every muscle hurts. {days} day(s).",
+     "Terrible. Persistent high fever, severe body aches, dry cough, drenched in sweat. {days} day(s).",
+     "I can barely move — high fever, shaking chills, splitting headache, bad cough. {days} day(s) like this.",
+     "Dangerously high fever, severe muscle pain, utterly exhausted. This has been {days} day(s)."],
+]
+
+PNEUMONIA_PHRASES = [
+    # band 0
+    ["I have a chesty cough with a bit of phlegm and some tightness in my chest. {days} day(s) now.",
+     "Persistent cough with mucus and mild chest discomfort. Started {days} day(s) ago.",
+     "I started with a cold but the cough has lingered — a bit of chest tightness too. {days} day(s).",
+     "Productive cough and slightly short of breath climbing stairs. {days} day(s) like this.",
+     "Cough with some yellowish mucus and a dull chest ache for {days} day(s)."],
+    # band 1
+    ["I have a bad productive cough — bringing up yellowish phlegm — and it hurts to breathe deeply. {days} day(s) like this.",
+     "Worsening chest cough with thick mucus, feverish, and quite short of breath. {days} day(s).",
+     "My chest really hurts when I cough or take a deep breath. Quite a bit of phlegm, fever, feeling weak. {days} day(s).",
+     "Coughing a lot, bringing up darker mucus, feverish, noticeably short of breath. {days} day(s).",
+     "Sharp pain in my chest when I breathe in, productive cough, fever. Worsened over {days} day(s)."],
+    # band 2
+    ["I'm struggling badly to breathe — every breath hurts, coughing up thick dark mucus, high fever. {days} day(s) of this.",
+     "I can't breathe properly. Severe chest pain, coughing up greenish phlegm, high temperature. {days} day(s) and scared.",
+     "Gasping with each breath, sharp chest pain, high fever, thick productive cough. {days} day(s) now.",
+     "My breathing is really laboured. Chest pain, high fever, can't stop coughing up phlegm. {days} day(s), deteriorating.",
+     "I feel like I'm suffocating. Severe shortness of breath, chest agony, high fever. {days} day(s) like this."],
+]
+
+
 # ─── Multi-variable phrase bank (layer 2 — new) ──────────────────────────────
 
 VARIABLE_PHRASES = {
@@ -491,7 +534,14 @@ class SymptomNarrator:
         the plateau (severity high but trends "stable"), and vague vital phrasing.
         """
         band   = _severity_perceived_band(inner_state.severity, personality)
-        base   = self._rng.choice(OPENING_PHRASES[band]).format(days=days)
+        disease = getattr(inner_state, 'disease_name', 'unknown')
+        if disease == "influenza":
+            phrase_bank = INFLUENZA_PHRASES
+        elif disease == "pneumonia":
+            phrase_bank = PNEUMONIA_PHRASES
+        else:
+            phrase_bank = OPENING_PHRASES
+        base   = self._rng.choice(phrase_bank[band]).format(days=days)
         parts  = [base]
 
         # Trend addon

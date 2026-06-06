@@ -139,6 +139,20 @@ class WandBFedAvg(FedAvg):
         return log
 
 
+# ── In-process client proxy ───────────────────────────────────────────────────
+
+class InProcessClientProxy:
+    """
+    Minimal duck-type for Flower's ClientProxy.
+
+    WandBFedAvg._build_fit_log and aggregate_fit only need `.cid`.  Used by
+    run_flower_federated_training to build the results list for aggregate_fit
+    without spawning gRPC connections.
+    """
+    def __init__(self, cid: str):
+        self.cid = cid
+
+
 # ── Distributed server launcher ───────────────────────────────────────────────
 
 def run_flower_server(

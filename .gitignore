@@ -16,6 +16,11 @@ env/
 
 # Simulation output logs
 sim_log_*.txt
+sim_logs/
+interactions/
+
+# Visualization outputs
+viz_output/
 
 # IDE / OS
 .idea/

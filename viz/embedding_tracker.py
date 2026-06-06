@@ -22,7 +22,7 @@ Outputs written to <output_dir>/
 
 NPZ schema (all files):
   raw    (N, H)  — raw CLS hidden states (H = 768 for DistilBERT)
-  labels (N,)    — ground-truth strings  e.g. "A99.0 / treat"
+  labels (N,)    — ground-truth strings  e.g. "influenza/severe", "non-infectious"
 """
 from __future__ import annotations
 
@@ -79,17 +79,22 @@ def generate_probe_events(
         for _ in range(40 * world.TICKS_PER_DAY):
             world.step_tick()
 
-        by_tier: dict[str, list] = {"home rest": [], "treat": [], "hospitalise": []}
+        by_severity: dict[str, list] = {"mild": [], "moderate": [], "severe": [], "non-infectious": []}
         for ev in world.clinic_queue.processed:
             if not ev.ground_truth or not ev.conversation:
                 continue
-            tier = ev.ground_truth.rsplit(" / ", 1)[-1]
-            if tier in by_tier:
-                by_tier[tier].append(ev)
+            # New format: "disease/severity" or "non-infectious"
+            gt = ev.ground_truth
+            if "/" in gt:
+                sev = gt.split("/", 1)[1]
+            else:
+                sev = gt  # "non-infectious"
+            if sev in by_severity:
+                by_severity[sev].append(ev)
 
-        for tier_events in by_tier.values():
-            rng.shuffle(tier_events)
-            all_events.extend(tier_events[:n_per_tier])
+        for sev_events in by_severity.values():
+            rng.shuffle(sev_events)
+            all_events.extend(sev_events[:n_per_tier])
 
     return all_events
 
@@ -292,16 +297,17 @@ class EmbeddingTracker:
                       if k.startswith("silo_") and k.endswith("_fed"))
         labels  = np.array(self._probe_labels)
 
-        # Colour maps — infectious (warm) vs non-infectious (cool) split palettes
-        icd3_list   = [(lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3])
+        # Colour maps — disease (warm) vs non-infectious (cool) split palettes
+        # New format: "disease/severity" or "non-infectious"
+        icd3_list   = [(lbl.split("/")[0] if "/" in lbl else lbl)
                        for lbl in self._probe_labels]
-        tier_list   = [(lbl.rsplit(" / ", 1)[-1] if " / " in lbl else "unknown")
+        tier_list   = [(lbl.split("/", 1)[1] if "/" in lbl else "non-infectious")
                        for lbl in self._probe_labels]
 
         unique_icd3 = sorted(set(icd3_list))
-        unique_tier = ["home rest", "treat", "hospitalise"]
+        unique_tier = ["mild", "moderate", "severe", "non-infectious"]
         icd_color   = _build_icd_color_map(unique_icd3)
-        cmap_tier   = plt.cm.get_cmap("Set2", 3)
+        cmap_tier   = plt.cm.get_cmap("Set2", 4)
         tier_color  = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
 
         saved: list[Path] = []
@@ -349,14 +355,14 @@ class EmbeddingTracker:
         rounds  = sorted(self._snapshots)
         n_silos = sum(1 for k in self._snapshots[rounds[0]]
                       if k.startswith("silo_") and k.endswith("_fed"))
-        icd3_list = [(lbl.split(" / ")[0][:3] if " / " in lbl else lbl[:3])
+        icd3_list = [(lbl.split("/")[0] if "/" in lbl else lbl)
                      for lbl in self._probe_labels]
-        tier_list = [(lbl.rsplit(" / ", 1)[-1] if " / " in lbl else "unknown")
+        tier_list = [(lbl.split("/", 1)[1] if "/" in lbl else "non-infectious")
                      for lbl in self._probe_labels]
         unique_icd3 = sorted(set(icd3_list))
-        unique_tier = ["home rest", "treat", "hospitalise"]
+        unique_tier = ["mild", "moderate", "severe", "non-infectious"]
         icd_color   = _build_icd_color_map(unique_icd3)
-        cmap_tier   = plt.cm.get_cmap("Set2", 3)
+        cmap_tier   = plt.cm.get_cmap("Set2", 4)
         tier_color  = {tier: cmap_tier(i) for i, tier in enumerate(unique_tier)}
 
         result: dict[str, str] = {}
@@ -549,7 +555,7 @@ class EmbeddingTracker:
             coords = _project(data)
             for row, (groups, cmap) in enumerate([
                 (unique_icd3, icd_color),
-                (["home rest", "treat", "hospitalise"], tier_color),
+                (list(tier_color), tier_color),
             ]):
                 ax = axes[row, col]
                 group_list = icd3_list if row == 0 else tier_list

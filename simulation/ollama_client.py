@@ -26,10 +26,10 @@ MODEL       = "phi3:mini"
 TIMEOUT_SEC = 60
 MAX_TURNS   = 6   # safety cap — prevents loops if model keeps asking questions
 
-SYSTEM_PROMPT = """\
-You are a triage doctor. Each reply is ONE JSON object — no other text.
+NURSE_SYSTEM_PROMPT = """\
+You are a triage nurse. Assess the severity of the patient's condition. Each reply is ONE JSON object — no other text.
 
-Before you diagnose, you must first ask the patient one question, then request their vitals.
+First ask the patient one follow-up question about their symptoms, then request their vitals.
 
 To ask a question:
 {"type": "question", "text": "your question here"}
@@ -37,16 +37,153 @@ To ask a question:
 To request vitals (after the patient has answered):
 {"type": "vitals_request"}
 
-To give your diagnosis (only after seeing vitals):
-{"type": "decision", "action": "home_recovery or resolve or hospitalise", "label": "mild or moderate or severe", "diagnosis": "brief text", "notes": "one sentence"}
+To give your triage assessment (only after seeing vitals):
+{"type": "triage", "severity": "discharge or mild or moderate or severe or critical", "notes": "one sentence"}
 
-Actions: home_recovery=mild (rest at home), resolve=moderate (needs treatment), hospitalise=severe (admit now).
-Output only one JSON object per turn. Never diagnose before seeing vitals.
+Severity guide — discharge: no concerning signs; mild: rest at home; moderate: clinic treatment; severe: urgent care; critical: immediate hospitalisation.
+Output only one JSON object per turn. Never assess before seeing vitals.
 """
+
+DOCTOR_SYSTEM_PROMPT = """\
+You are a diagnostic doctor. The triage nurse has already assessed severity. Your task is to identify the disease.
+Each reply is ONE JSON object — no other text.
+
+You may ask the patient one clarifying question if needed, then give your diagnosis.
+
+To ask a question:
+{"type": "question", "text": "your question here"}
+
+To give your diagnosis:
+{"type": "diagnosis", "disease": "influenza or pneumonia or non-infectious or unknown", "notes": "one sentence", "triage_confirmed": true or false}
+
+Choose "unknown" when the symptom pattern does not match any known disease.
+Output only one JSON object per turn.
+"""
+
+# Legacy alias — kept so external code that imports SYSTEM_PROMPT still works
+SYSTEM_PROMPT = DOCTOR_SYSTEM_PROMPT
 
 
 class OllamaUnavailableError(RuntimeError):
     pass
+
+
+class TriageNurseClient:
+    """
+    Single-purpose triage nurse: runs a brief multi-turn conversation to assess
+    severity (discharge/mild/moderate/severe/critical) and records it on the event.
+
+    Shares the same Ollama server as the diagnostic doctor but uses NURSE_SYSTEM_PROMPT.
+    Called first in the two-agent pipeline before OllamaDiagnosticClient runs.
+    """
+
+    def __init__(self, model: str = MODEL, url: str = OLLAMA_URL,
+                 timeout: int = TIMEOUT_SEC, patient_llm=None):
+        self.model        = model
+        self.url          = url
+        self.timeout      = timeout
+        self._patient_llm = patient_llm
+
+    def triage(self, event: DiagnosticEvent, _queue=None,
+               _format_vitals=None, _patient_answer=None) -> str:
+        """
+        Run the nurse conversation. Returns the severity string and stores it
+        on event.nurse_severity.  The full nurse conversation is appended to
+        event.conversation so the doctor can read it.
+
+        _format_vitals, _patient_answer: callables injected by the pipeline so
+        the nurse reuses the same vitals/answer logic without duplicating code.
+        """
+        def _status(msg):
+            if _queue:
+                _queue.update_status(event.agent_id, msg)
+
+        messages     = [{"role": "system", "content": NURSE_SYSTEM_PROMPT}]
+        opening      = next(
+            (t["text"] for t in event.conversation if t["role"] == "patient"),
+            "I am not feeling well.",
+        )
+        messages.append({"role": "user", "content": opening})
+
+        vitals_taken = False
+        severity     = "mild"   # fallback
+
+        for turn in range(MAX_TURNS):
+            _status(f"Nurse assessing… (turn {turn + 1})")
+            raw    = self._call_ollama(messages)
+            parsed = self._parse_response(raw)
+
+            if parsed["type"] == "question" and not vitals_taken and parsed.get("text"):
+                q_text = parsed["text"]
+                event.conversation.append({"role": "nurse",   "text": q_text})
+                messages.append({"role": "assistant", "content": json.dumps(parsed)})
+                _status("Patient answering…")
+                answer = _patient_answer(event, q_text) if _patient_answer else "I'm not sure."
+                event.conversation.append({"role": "patient", "text": answer})
+                messages.append({"role": "user", "content": answer})
+
+            elif parsed["type"] == "vitals_request" and not vitals_taken:
+                vitals_str = _format_vitals(event) if _format_vitals else "[VITALS] unavailable"
+                event.conversation.append({"role": "nurse",   "text": "[measuring vitals]"})
+                event.conversation.append({"role": "vitals",  "text": vitals_str})
+                messages.append({"role": "assistant", "content": json.dumps(parsed)})
+                messages.append({"role": "user",      "content": vitals_str})
+                vitals_taken = True
+
+            elif parsed["type"] == "triage":
+                severity = parsed.get("severity", "mild").lower()
+                if severity not in ("discharge", "mild", "moderate", "severe", "critical"):
+                    severity = "mild"
+                notes = (parsed.get("notes") or "")[:120]
+                event.conversation.append({
+                    "role": "nurse",
+                    "text": f"[Triage] Severity: {severity}. {notes}",
+                })
+                break
+
+            else:
+                # Force a triage if the nurse got stuck
+                messages.append({
+                    "role": "user",
+                    "content": "Please give your triage severity assessment now.",
+                })
+
+        event.nurse_severity = severity
+        return severity
+
+    def _call_ollama(self, messages):
+        payload = json.dumps({
+            "model": self.model, "messages": messages,
+            "stream": False, "format": "json",
+            "options": {"temperature": 0.2, "num_predict": 100},
+        }).encode()
+        req = urllib.request.Request(
+            self.url, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read()).get("message", {}).get("content", "")
+        except urllib.error.URLError as exc:
+            raise OllamaUnavailableError(f"Cannot reach Ollama at {self.url}: {exc.reason}") from exc
+        except Exception as exc:
+            raise OllamaUnavailableError(f"Ollama request failed: {exc}") from exc
+
+    def _parse_response(self, raw: str) -> dict:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {"type": "triage", "severity": "mild"}
+        t = data.get("type", "")
+        if t in ("question", "vitals_request", "triage"):
+            return data
+        for val in data.values():
+            if isinstance(val, dict) and val.get("type") in ("question", "vitals_request", "triage"):
+                return val
+        if "severity" in data:
+            data["type"] = "triage"
+            return data
+        return {"type": "vitals_request"}
 
 
 class OllamaDiagnosticClient:
@@ -72,84 +209,103 @@ class OllamaDiagnosticClient:
         self._proto_library    = None   # PrototypeLibrary | None
         self._proto_encoder    = None   # (model, tokenizer) for embedding queries
         self._proto_k:         int = 3  # prototypes retrieved per query
+        self._global_stereos:  dict    = {}   # {label: centroid} from StereotypeLibrary
+        self._n_stereo_silos:  int     = 0
+        # Triage nurse — shares Ollama server; runs before doctor in the pipeline
+        self._nurse = TriageNurseClient(model=model, url=url,
+                                        timeout=timeout, patient_llm=patient_llm)
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     def diagnose(self, event: DiagnosticEvent, _queue=None,
                  _proto_lib=None) -> DiagnosticEvent:
         """
-        Run the full patient-doctor pipeline for one DiagnosticEvent.
+        Two-agent clinical pipeline:
+          Phase 1 — Triage nurse assesses severity (sets event.nurse_severity)
+          Phase 2 — Diagnostic doctor identifies disease (sets event.doctor_disease)
+
         event.conversation must already contain the opening patient statement.
-        Raises OllamaUnavailableError if the doctor model is unreachable.
-
-        _proto_lib : PrototypeLibrary | None
-            Per-silo library passed at call time so the shared client can serve
-            all silos without holding per-silo state.
+        Both agents' turns are recorded sequentially on event.conversation.
+        Raises OllamaUnavailableError if the Ollama server is unreachable.
         """
-        messages     = self._build_initial_messages(event, proto_lib=_proto_lib)
-        vitals_taken = False
-        turn         = 0
-
         def _status(msg: str) -> None:
             if _queue:
                 _queue.update_status(event.agent_id, msg)
 
-        while turn < MAX_TURNS:
-            _status(f"Doctor thinking… (turn {turn + 1})")
+        nurse_turns = 0
+
+        # ── Phase 1: Triage nurse ─────────────────────────────────────────────
+        _status("Nurse triaging…")
+        nurse_start = len(event.conversation)
+        severity = self._nurse.triage(
+            event,
+            _queue         = _queue,
+            _format_vitals = self._format_vitals,
+            _patient_answer= self._patient_answer,
+        )
+        nurse_turns = len(event.conversation) - nurse_start
+
+        # Map nurse severity → action
+        sev_to_action = {
+            "discharge": DiagnosticAction.RECOVER,
+            "mild":      DiagnosticAction.RECOVER,
+            "moderate":  DiagnosticAction.RESOLVE,
+            "severe":    DiagnosticAction.HOSPITALISE,
+            "critical":  DiagnosticAction.HOSPITALISE,
+        }
+        event.action = sev_to_action.get(severity, DiagnosticAction.RECOVER)
+
+        # ── Phase 2: Diagnostic doctor ────────────────────────────────────────
+        messages = self._build_doctor_messages(event, proto_lib=_proto_lib)
+        doctor_turns = 0
+
+        for turn in range(MAX_TURNS):
+            _status(f"Doctor diagnosing… (turn {turn + 1})")
             raw    = self._call_ollama(messages)
             parsed = self._parse_response(raw)
-            turn  += 1
+            doctor_turns += 1
 
-            if parsed["type"] == "question" and not vitals_taken and parsed.get("text"):
-                # Step 1 — symptom follow-up
+            if parsed["type"] == "question" and parsed.get("text"):
                 q_text = parsed["text"]
                 event.conversation.append({"role": "doctor",  "text": q_text})
                 messages.append({"role": "assistant", "content": json.dumps(parsed)})
-
                 _status("Patient answering…")
                 answer = self._patient_answer(event, q_text)
                 event.conversation.append({"role": "patient", "text": answer})
                 messages.append({"role": "user", "content": answer})
 
-            elif parsed["type"] == "vitals_request" and not vitals_taken:
-                # Step 2 — objective vitals panel
-                vitals_str = self._format_vitals(event)
-                event.conversation.append({"role": "doctor", "text": "[measuring vitals]"})
-                event.conversation.append({"role": "vitals",  "text": vitals_str})
-                messages.append({"role": "assistant", "content": json.dumps(parsed)})
-                messages.append({"role": "user",      "content": vitals_str})
-                vitals_taken = True
-
             else:
-                # Step 3 — decision (or force one if model got stuck)
-                if parsed["type"] != "decision":
-                    parsed = self._force_decision(messages)
+                if parsed["type"] != "diagnosis":
+                    parsed = self._force_diagnosis(messages)
 
-                action_map = {
-                    "home_recovery": DiagnosticAction.RECOVER,
-                    "resolve":       DiagnosticAction.RESOLVE,
-                    "hospitalise":   DiagnosticAction.HOSPITALISE,
-                    "hospitalize":   DiagnosticAction.HOSPITALISE,
-                }
-                event.action       = action_map.get(
-                    (parsed.get("action") or "").lower(), DiagnosticAction.RECOVER
-                )
-                event.oracle_label = parsed.get("label") or "unknown"
-                event.diagnosis    = (parsed.get("diagnosis") or "")[:100]
-                event.notes        = (parsed.get("notes") or "")[:160]
-                action_str = (parsed.get("action") or "unknown").replace("_", " ")
+                disease = (parsed.get("disease") or "unknown").lower()
+                if disease not in ("influenza", "pneumonia", "non-infectious", "unknown"):
+                    disease = "unknown"
+                event.doctor_disease = disease
+                event.diagnosis      = (parsed.get("notes") or "")[:100]
+                event.oracle_label   = disease
+                triage_ok = bool(parsed.get("triage_confirmed", True))
                 event.conversation.append({
                     "role": "doctor",
                     "text": (
-                        f"Diagnosis: {event.diagnosis}. "
-                        f"Outcome: {action_str} ({event.oracle_label}). "
-                        f"{event.notes}"
+                        f"Diagnosis: {disease}. "
+                        f"Triage {'confirmed' if triage_ok else 'adjusted'}. "
+                        f"{event.diagnosis}"
                     ),
                 })
                 break
 
-        event.num_turns = turn
+        event.num_turns = nurse_turns + doctor_turns
         return event
+
+    def update_global_stereotypes(self, centroids: dict, n_silos: int = 0) -> None:
+        """
+        Store federated stereotype centroids for prior injection at inference.
+        Called by the FL orchestrator after each round's aggregate_stereotypes().
+        Pass an empty dict to disable stereotype injection.
+        """
+        self._global_stereos = centroids
+        self._n_stereo_silos = n_silos
 
     def set_prototype_library(self, library, encoder_model, tokenizer,
                                k: int = 3) -> None:
@@ -170,21 +326,25 @@ class OllamaDiagnosticClient:
         (question → patient answer → vitals_request → vitals → decision) so the
         model sees the correct protocol, not a shortcut opening→decision.
         """
-        mgmt_to_action = {
-            "home rest":   DiagnosticAction.RECOVER,
-            "treat":       DiagnosticAction.RESOLVE,
-            "hospitalise": DiagnosticAction.HOSPITALISE,
+        sev_to_action = {
+            "mild":           DiagnosticAction.RECOVER,
+            "moderate":       DiagnosticAction.RESOLVE,
+            "severe":         DiagnosticAction.HOSPITALISE,
+            "non-infectious": DiagnosticAction.RECOVER,
+            "none":           DiagnosticAction.RECOVER,
         }
 
-        by_tier: dict[str, list[tuple[int, list]]] = {t: [] for t in mgmt_to_action}
+        by_sev: dict[str, list[tuple[int, list]]] = {k: [] for k in ("mild", "moderate", "severe", "non-infectious")}
 
         for ev in events:
             if not ev.ground_truth or not ev.action or not ev.conversation:
                 continue
-            parts = ev.ground_truth.rsplit(" / ", 1)
-            if len(parts) != 2:
-                continue
-            expected = mgmt_to_action.get(parts[1])
+            gt = ev.ground_truth
+            if "/" in gt:
+                sev = gt.split("/", 1)[1]
+            else:
+                sev = "non-infectious"
+            expected = sev_to_action.get(sev)
             if expected != ev.action:
                 continue
 
@@ -195,12 +355,13 @@ class OllamaDiagnosticClient:
 
             messages = self._conversation_to_messages(ev)
             n_turns  = len(ev.conversation)
-            by_tier[parts[1]].append((n_turns, messages))
+            if sev in by_sev:
+                by_sev[sev].append((n_turns, messages))
 
         self._examples = []
-        for tier_examples in by_tier.values():
-            tier_examples.sort(key=lambda x: x[0])
-            self._examples.extend(msgs for _, msgs in tier_examples[:max_per_tier])
+        for sev_examples in by_sev.values():
+            sev_examples.sort(key=lambda x: x[0])
+            self._examples.extend(msgs for _, msgs in sev_examples[:max_per_tier])
 
     def num_examples(self) -> int:
         return len(self._examples)
@@ -264,17 +425,24 @@ class OllamaDiagnosticClient:
 
         return "[VITALS] " + " | ".join(parts)
 
-    def _build_initial_messages(self, event: DiagnosticEvent,
-                                proto_lib=None) -> list[dict]:
+    def _build_doctor_messages(self, event: DiagnosticEvent,
+                               proto_lib=None) -> list[dict]:
+        """
+        Build the initial message list for the diagnostic doctor.
+        Includes: system prompt, RAG injections, full nurse conversation so far,
+        and the nurse's triage summary as context.
+        """
+        messages = [{"role": "system", "content": DOCTOR_SYSTEM_PROMPT}]
+
+        # Shared query embedding for prototype + stereotype retrieval
         opening = next(
             (t["text"] for t in event.conversation if t["role"] == "patient"),
             "I am not feeling well.",
         )
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-        # Prototype retrieval — per-silo library passed at call time
-        library = proto_lib or self._proto_library
-        if library is not None and self._proto_encoder is not None:
+        query_vec = None
+        library   = proto_lib or self._proto_library
+        need_embed = (library is not None or bool(self._global_stereos))
+        if need_embed and self._proto_encoder is not None:
             try:
                 import torch
                 enc_model, tokenizer = self._proto_encoder
@@ -284,19 +452,107 @@ class OllamaDiagnosticClient:
                 enc_model.eval()
                 with torch.no_grad():
                     out = enc_model(
-                        input_ids=enc["input_ids"].to(device),
-                        attention_mask=enc["attention_mask"].to(device),
-                        output_hidden_states=True,
+                        input_ids      = enc["input_ids"].to(device),
+                        attention_mask = enc["attention_mask"].to(device),
+                        output_hidden_states = True,
                     )
                 query_vec = out.hidden_states[-1][0, 0, :].cpu().numpy()
+            except Exception:
+                pass
+
+        if library is not None and query_vec is not None:
+            try:
                 retrieved = library.retrieve(query_vec, k=self._proto_k)
                 if retrieved:
                     from fl.prototype_library import prototypes_to_prompt_messages
                     messages.extend(prototypes_to_prompt_messages(retrieved))
             except Exception:
-                pass  # best-effort; never blocks diagnosis
+                pass
 
-        # Conversation few-shot examples (appended after protos)
+        if self._global_stereos and query_vec is not None:
+            try:
+                from fl.stereotype_library import (nearest_centroids,
+                                                   stereotypes_to_prompt_messages)
+                nearest = nearest_centroids(query_vec, self._global_stereos, k=5)
+                if nearest:
+                    messages.extend(stereotypes_to_prompt_messages(
+                        nearest, n_silos=self._n_stereo_silos,
+                    ))
+            except Exception:
+                pass
+
+        for ex_messages in self._examples:
+            messages.extend(ex_messages)
+
+        # Inject nurse triage summary so doctor has context
+        if event.nurse_severity:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[Triage nurse assessment] Severity: {event.nurse_severity}. "
+                    f"Patient: {opening}"
+                ),
+            })
+        else:
+            messages.append({"role": "user", "content": opening})
+
+        return messages
+
+    def _build_initial_messages(self, event: DiagnosticEvent,
+                                proto_lib=None) -> list[dict]:
+        opening = next(
+            (t["text"] for t in event.conversation if t["role"] == "patient"),
+            "I am not feeling well.",
+        )
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # Compute query embedding once — shared by prototype and stereotype paths.
+        # Only encode if at least one retrieval system is active.
+        query_vec = None
+        library   = proto_lib or self._proto_library
+        need_embed = (library is not None or bool(self._global_stereos))
+        if need_embed and self._proto_encoder is not None:
+            try:
+                import torch
+                enc_model, tokenizer = self._proto_encoder
+                device = next(enc_model.parameters()).device
+                enc = tokenizer([opening], padding=True, truncation=True,
+                                max_length=128, return_tensors="pt")
+                enc_model.eval()
+                with torch.no_grad():
+                    out = enc_model(
+                        input_ids      = enc["input_ids"].to(device),
+                        attention_mask = enc["attention_mask"].to(device),
+                        output_hidden_states = True,
+                    )
+                query_vec = out.hidden_states[-1][0, 0, :].cpu().numpy()
+            except Exception:
+                pass
+
+        # ── Prototype retrieval (exemplar-based few-shot RAG) ─────────────────
+        if library is not None and query_vec is not None:
+            try:
+                retrieved = library.retrieve(query_vec, k=self._proto_k)
+                if retrieved:
+                    from fl.prototype_library import prototypes_to_prompt_messages
+                    messages.extend(prototypes_to_prompt_messages(retrieved))
+            except Exception:
+                pass
+
+        # ── Stereotype prior (centroid-based classification hint) ─────────────
+        if self._global_stereos and query_vec is not None:
+            try:
+                from fl.stereotype_library import (nearest_centroids,
+                                                   stereotypes_to_prompt_messages)
+                nearest = nearest_centroids(query_vec, self._global_stereos, k=5)
+                if nearest:
+                    messages.extend(stereotypes_to_prompt_messages(
+                        nearest, n_silos=self._n_stereo_silos,
+                    ))
+            except Exception:
+                pass
+
+        # ── Conversation few-shot examples (appended after retrieval) ─────────
         for ex_messages in self._examples:
             messages.extend(ex_messages)
 
@@ -364,31 +620,33 @@ class OllamaDiagnosticClient:
                     "label": "parse_error",
                     "notes": f"Unparseable output: {raw[:60]}"}
 
-        # Ideal flat response: {"type": "question"|"vitals_request"|"decision", ...}
-        known = ("question", "vitals_request", "decision")
+        known = ("question", "vitals_request", "decision", "triage", "diagnosis")
         top_type = data.get("type", "")
         if top_type in known and (top_type != "question" or data.get("text")):
             return data
 
-        # phi3:mini sometimes nests responses: {"Follow-up": {"type":"question","text":"..."},...}
-        # Walk one level of nesting and pick the first well-formed action.
+        # phi3:mini sometimes nests responses — walk one level
         for val in data.values():
             if not isinstance(val, dict):
                 continue
             vtype = val.get("type", "")
             if vtype == "question" and val.get("text"):
                 return val
-            if vtype == "vitals_request":
+            if vtype in ("vitals_request", "triage", "diagnosis"):
                 return val
             if vtype == "decision" and val.get("action"):
                 return val
 
-        # Fall back: if top-level has "action" it's a malformed decision
+        if "disease" in data:
+            data["type"] = "diagnosis"
+            return data
+        if "severity" in data:
+            data["type"] = "triage"
+            return data
         if "action" in data:
             data["type"] = "decision"
             return data
 
-        # Advance protocol: skip to vitals request rather than failing silently
         return {"type": "vitals_request"}
 
     def _force_decision(self, messages: list[dict]) -> dict:
@@ -402,3 +660,16 @@ class OllamaDiagnosticClient:
             return parsed
         return {"type": "decision", "action": "home_recovery",
                 "label": "unknown", "notes": "Could not obtain decision from model."}
+
+    def _force_diagnosis(self, messages: list[dict]) -> dict:
+        messages = messages + [{
+            "role": "user",
+            "content": "Please give your final disease diagnosis now.",
+        }]
+        raw    = self._call_ollama(messages)
+        parsed = self._parse_response(raw)
+        if parsed.get("type") == "diagnosis":
+            return parsed
+        return {"type": "diagnosis", "disease": "unknown",
+                "notes": "Could not obtain diagnosis from model.",
+                "triage_confirmed": True}

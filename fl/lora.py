@@ -22,9 +22,8 @@ class LoRAConfig:
     target_modules: list[str] = field(
         default_factory=lambda: ["q_lin", "v_lin"]
     )
-    # 8 canonical ICD codes × 3 management tiers (home rest / treat / hospitalise)
-    # = 3 infectious + 5 non-infectious, overridden dynamically by WorldFLClient
-    num_labels: int = 24
+    # 7 diagnostic labels: 2 diseases × 3 severities + non-infectious
+    num_labels: int = 7
 
     @property
     def scaling(self) -> float:
@@ -39,15 +38,18 @@ def build_model(config: LoRAConfig):
     from peft import LoraConfig as PeftLoraConfig, TaskType, get_peft_model
     from transformers import AutoModelForSequenceClassification, logging as hf_logging
 
-    # Suppress expected warnings: UNEXPECTED keys = MLM head not used for
-    # classification; MISSING keys = new classification head (expected).
+    # Suppress expected warnings (UNEXPECTED keys = MLM head, MISSING keys = new
+    # classifier head) and the per-parameter loading progress bar — both are
+    # expected artifacts of loading a base model for LoRA fine-tuning.
     hf_logging.set_verbosity_error()
+    hf_logging.disable_progress_bar()
 
     base = AutoModelForSequenceClassification.from_pretrained(
         config.model_name_or_path,
         num_labels=config.num_labels,
     )
 
+    hf_logging.enable_progress_bar()
     hf_logging.set_verbosity_warning()  # restore for other HF calls
     peft_cfg = PeftLoraConfig(
         task_type=TaskType.SEQ_CLS,

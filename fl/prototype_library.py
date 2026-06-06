@@ -71,10 +71,13 @@ class PrototypeLibrary:
         import torch
         from simulation.models import DiagnosticAction
 
-        tier_map = {
-            DiagnosticAction.RECOVER:    "home rest",
-            DiagnosticAction.RESOLVE:    "treat",
-            DiagnosticAction.HOSPITALISE:"hospitalise",
+        # Map action → expected severity bucket under new label scheme
+        sev_to_action = {
+            "mild":           DiagnosticAction.RECOVER,
+            "moderate":       DiagnosticAction.RESOLVE,
+            "severe":         DiagnosticAction.HOSPITALISE,
+            "non-infectious": DiagnosticAction.RECOVER,
+            "none":           DiagnosticAction.RECOVER,
         }
         added = 0
         texts, outcomes = [], []
@@ -82,12 +85,13 @@ class PrototypeLibrary:
         for ev in events:
             if not ev.ground_truth or not ev.action:
                 continue
-            parts = ev.ground_truth.rsplit(" / ", 1)
-            if len(parts) != 2:
-                continue
-            expected_tier = parts[1]
-            actual_tier   = tier_map.get(ev.action, "")
-            if expected_tier != actual_tier:
+            gt = ev.ground_truth
+            if "/" in gt:
+                sev = gt.split("/", 1)[1]
+            else:
+                sev = "non-infectious"
+            expected_action = sev_to_action.get(sev)
+            if expected_action != ev.action:
                 continue
             patient_turns = [t["text"] for t in ev.conversation
                              if t["role"] == "patient"]
@@ -217,35 +221,47 @@ def prototypes_to_prompt_messages(prototypes: list[CasePrototype]) -> list[dict]
     This slots into _build_initial_messages() before the real patient turn.
     """
     import json
+
+    # New label format: "disease/severity" or "non-infectious"
+    sev_to_action = {
+        "mild":           "home_recovery",
+        "moderate":       "resolve",
+        "severe":         "hospitalise",
+        "non-infectious": "home_recovery",
+        "none":           "home_recovery",
+    }
+    sev_desc = {
+        "mild":           "mild severity — home rest",
+        "moderate":       "moderate severity — treatment needed",
+        "severe":         "severe — hospitalise",
+        "non-infectious": "non-infectious complaint",
+    }
+    disease_display = {
+        "influenza":       "Influenza",
+        "pneumonia":       "Bacterial Pneumonia",
+        "non-infectious":  "Non-infectious complaint",
+    }
+
     messages = []
     for p in prototypes:
-        parts = p.outcome.rsplit(" / ", 1)
-        if len(parts) != 2:
-            continue
-        icd, mgmt = parts
-        icd3      = icd[:3]
-        disease   = ICD3_NAMES.get(icd3, icd)
-        mgmt_desc = MGMT_LABELS.get(mgmt, mgmt)
+        gt = p.outcome
+        if "/" in gt:
+            disease_key, sev = gt.split("/", 1)
+        else:
+            disease_key, sev = gt, "none"
 
-        action_map = {
-            "home rest":   "home_recovery",
-            "treat":       "resolve",
-            "hospitalise": "hospitalise",
-        }
-        label_map = {
-            "home rest":   "mild",
-            "treat":       "moderate",
-            "hospitalise": "severe",
-        }
+        disease   = disease_display.get(disease_key, disease_key)
+        mgmt_desc = sev_desc.get(sev, sev)
+        action    = sev_to_action.get(sev, "home_recovery")
 
         user_text = (
-            f"[Retrieved case — {disease}, managed as: {mgmt_desc}. "
+            f"[Retrieved case — {disease}, {mgmt_desc}. "
             f"Origin: silo {p.silo_id}, round {p.round_num}.]"
         )
         assistant_json = json.dumps({
             "type":      "decision",
-            "action":    action_map.get(mgmt, "home_recovery"),
-            "label":     label_map.get(mgmt, "unknown"),
+            "action":    action,
+            "label":     sev if sev != "none" else "mild",
             "diagnosis": f"{disease} presentation",
             "notes":     f"Based on similar past case from silo {p.silo_id}.",
         })

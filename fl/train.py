@@ -60,15 +60,15 @@ class WorldConfig:
     condition — enabling asymmetric (non-IID) federation.
 
     Example — urban vs. rural silos:
-        WorldConfig(num_agents=150, progressions=["Aggressive Flu", "Mild Corona"],
-                    disease_strategy="Aggressive Flu", beta_scale=1.3)
-        WorldConfig(num_agents=60,  progressions=["Standard Flu"],
-                    disease_strategy="Standard Flu",   beta_scale=0.7)
+        WorldConfig(num_agents=150, progressions=["Influenza", "Bacterial Pneumonia"],
+                    disease_strategy="Influenza", beta_scale=1.3)
+        WorldConfig(num_agents=60,  progressions=["Bacterial Pneumonia"],
+                    disease_strategy="Influenza",   beta_scale=0.7)
     """
     num_agents:            int         = 30
-    progressions:          list[str]   = field(default_factory=lambda: ["Standard Flu"])
+    progressions:          list[str]   = field(default_factory=lambda: ["Influenza"])
     disease_weights:       Optional[list[float]] = None  # per-disease prevalence; None = uniform
-    disease_strategy:      str         = "Standard Flu"
+    disease_strategy:      str         = "Influenza"
     beta_scale:            float       = 1.0
     background_visit_rate: float       = 0.025
     end_condition:         str         = "extinction"
@@ -98,8 +98,8 @@ class FLTrainConfig:
     lora_rank:           int         = 8
     lora_alpha:          float       = 16.0
     lora_dropout:        float       = 0.05
-    progressions:        list[str]   = field(default_factory=lambda: ["Standard Flu"])
-    disease_strategy:    str         = "Standard Flu"
+    progressions:        list[str]   = field(default_factory=lambda: ["Influenza"])
+    disease_strategy:    str         = "Influenza"
     seed:                int         = 42
     # Per-silo non-IID config (overrides global params when provided)
     world_configs:       Optional[list[WorldConfig]] = None
@@ -112,8 +112,12 @@ class FLTrainConfig:
     # Non-IID disease distribution — Dirichlet(α) per silo over the disease list
     # α → 0: each silo dominated by one disease; α → ∞: IID mix
     dirichlet_alpha:     float       = 0.3
-    # Replay buffer: events accumulated across rounds for local LoRA training
-    replay_buffer_size:  int         = 2048
+    # Training device: "cpu" (default, safe) or "cuda" (faster but risks VRAM clash with Ollama)
+    training_device:     str         = "cpu"
+    # On-disk dataset per silo — replaces in-memory replay buffer
+    dataset_dir:         str         = "datasets"
+    holdout_fraction:    float        = 0.2   # fraction of events withheld for testing
+    train_sample_cap:    int         = 512    # max records sampled per round (stratified)
     # W&B
     wandb_project:       str         = "fedworld"
     wandb_run_name:      Optional[str] = None
@@ -121,6 +125,8 @@ class FLTrainConfig:
     wandb_offline:       bool        = False
     use_ollama:          bool        = True
     patient_model:       str         = "tinyllama"
+    # FL backend: "inprocess" (default, no dependencies) or "flower" (uses Flower protocol)
+    fl_backend:          str         = "inprocess"
 
     def lora_config(self) -> LoRAConfig:
         return LoRAConfig(
@@ -168,6 +174,9 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
                                 if k in FLTrainConfig.__dataclass_fields__})
 
+    if getattr(cfg, "fl_backend", "inprocess") == "flower":
+        return run_flower_federated_training(cfg, _shared_tracker=_shared_tracker)
+
     import wandb
     from simulation.strategies import STRATEGIES
 
@@ -185,6 +194,18 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         config  = wandb_cfg,
         reinit  = "finish_previous",
     )
+
+    # ── Per-silo on-disk datasets ─────────────────────────────────────────────
+    # Created here (before worlds) so each run gets its own subdirectory.
+    _run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _dataset_dir = Path(cfg.dataset_dir) / _run_id
+    from fl.dataset import SiloDataset
+    _silo_datasets = [
+        SiloDataset(_dataset_dir, i, cfg.holdout_fraction, cfg.seed)
+        for i in range(cfg.num_silos)
+    ]
+    print(f"  [dataset] {_dataset_dir}/silo_{{0..{cfg.num_silos-1}}}/  "
+          f"holdout={cfg.holdout_fraction:.0%}  cap={cfg.train_sample_cap}")
 
     # ── World builder — respects per-silo WorldConfig when provided ───────────
     rng_dirichlet = np.random.default_rng(cfg.seed)
@@ -256,7 +277,9 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             local_epochs           = cfg.local_epochs,
             batch_size             = cfg.batch_size,
             lr                     = cfg.lr,
-            replay_buffer_size     = cfg.replay_buffer_size,
+            dataset                = _silo_datasets[silo_idx],
+            train_sample_cap       = cfg.train_sample_cap,
+            training_device        = cfg.training_device,
         )
 
     # ── Create silos ──────────────────────────────────────────────────────────
@@ -265,6 +288,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     # ── Prototype libraries — one per silo ────────────────────────────────────
     from fl.prototype_library import PrototypeLibrary, federate_libraries
     proto_libs = [PrototypeLibrary(silo_id=i) for i in range(cfg.num_silos)]
+
+    # ── Stereotype libraries — one per silo (federated centroid averaging) ────
+    from fl.stereotype_library import StereotypeLibrary, aggregate_stereotypes
+    stereo_libs = [StereotypeLibrary() for _ in range(cfg.num_silos)]
 
     # ── Wire LLM clients — single shared Ollama server, all silos call it ────
     ollama_client  = None
@@ -330,7 +357,6 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
     # ── Report ────────────────────────────────────────────────────────────────
     from simulation.report import RunReport
-    _run_id    = datetime.now().strftime("%Y%m%d_%H%M%S")
     _report    = RunReport(cfg, _run_id)
     _report_path = Path(f"reports/run_{_run_id}.html")
 
@@ -347,17 +373,21 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         print(f"  [embed] {len(_tracker.probe_events)} probe events ready "
               f"({len(set(e.ground_truth for e in _tracker.probe_events))} unique labels)\n")
 
-    # ── Initialise global weights from silo 0 ─────────────────────────────────
-    global_weights = silos[0].get_weights()
+    # ── Initialise global weights from silo 0 (doctor + nurse) ───────────────
+    global_weights       = silos[0].get_weights()
+    global_nurse_weights = silos[0].get_nurse_weights()
     silos[0].release_model()   # free immediately — rebuilt in round 1 with set_weights
+
+    _known_stereo_labels: set[str] = set()   # tracks growth across rounds
 
     # ── FL rounds — simulation-guided (run until all silos done or max_rounds) ─
     for round_num in range(1, cfg.max_rounds + 1):
         t0 = time.time()
 
-        round_weights:   list[list[np.ndarray]] = []
-        round_nexamples: list[int]             = []
-        round_trained:   list[bool]            = []
+        round_weights:       list[list[np.ndarray]] = []
+        round_nurse_weights: list[list[np.ndarray]] = []
+        round_nexamples:     list[int]             = []
+        round_trained:       list[bool]            = []
         log: dict = {"round": round_num}
 
         agg_loss = agg_acc = agg_n = agg_trained = 0.0
@@ -369,25 +399,26 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
         for i, silo in enumerate(silos):
             if silo.is_done:
-                # Done silo: passive observer — silently adopts global weights only
-                # if they strictly improve on its last checkpoint (see try_accept_global).
-                # fedavg_n=0 means frozen weights never enter the aggregation.
                 silo.try_accept_global(global_weights)
-                m = silo.run_round()  # frozen path — no simulation
-                fedavg_n = 0  # passive observer: receives updates, never votes
+                silo.set_nurse_weights(global_nurse_weights)
+                m = silo.run_round(round_num=round_num)
+                fedavg_n = 0
             else:
                 silo.set_weights(global_weights)
-                m = silo.run_round()
+                silo.set_nurse_weights(global_nurse_weights)
+                m = silo.run_round(round_num=round_num)
                 fedavg_n = m.get("num_examples", 0)
 
             fed_w   = silo.get_weights()
+            nurse_w = silo.get_nurse_weights()
             from fl.lora import get_lora_weights as _glw
             local_w = _glw(silo.learner.local_model)
             snap_fed_weights.append(fed_w)
             snap_local_weights.append(local_w)
 
             round_weights.append(fed_w)
-            silo.release_model()   # free VRAM — model no longer needed this round
+            round_nurse_weights.append(nurse_w)
+            silo.release_model()   # free VRAM — also releases nurse model
             n         = m.get("num_examples", 0)
             did_train = bool(m.get("trained", 0))
             round_nexamples.append(fedavg_n)
@@ -422,9 +453,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                         agg_key = f"aggregated/{sub}"
                         log[agg_key] = log.get(agg_key, 0.0) + v * n
 
-        # ── FedAvg — include all silos (done silos use _frozen_n weight) ──────
+        # ── FedAvg — doctor + nurse aggregated separately ──────────────────
         if any(n > 0 for n in round_nexamples):
-            global_weights = _fedavg(round_weights, round_nexamples)
+            global_weights       = _fedavg(round_weights,       round_nexamples)
+            global_nurse_weights = _fedavg(round_nurse_weights, round_nexamples)
         log["aggregated/silos_trained"] = sum(round_trained)
 
         # ── Embedding snapshot — weights already collected, no model rebuilds ──
@@ -456,6 +488,25 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                 lib.merge(global_protos)
             log["aggregated/proto_total"] = sum(l.size() for l in proto_libs)
 
+            # ── Stereotype federation: update centroids, aggregate, broadcast ─
+            for i, silo in enumerate(silos):
+                stereo_libs[i].update_from_events(
+                    silo.last_round_events, enc_model, enc_tok, device=enc_device,
+                )
+            global_stereos = aggregate_stereotypes(
+                [l.get_state() for l in stereo_libs]
+            )
+            for lib in stereo_libs:
+                lib.set_global(global_stereos)
+            ollama_client.update_global_stereotypes(global_stereos,
+                                                    n_silos=cfg.num_silos)
+            _new_labels = [l for l in global_stereos if l not in _known_stereo_labels]
+            _known_stereo_labels.update(global_stereos.keys())
+            log["aggregated/stereo_classes"]     = len(global_stereos)
+            log["aggregated/stereo_new_classes"] = len(_new_labels)
+            if _new_labels:
+                print(f"  [stereo] New class centroid(s) federated: {sorted(_new_labels)}")
+
         # ── Early exit if all silos finished ──────────────────────────────────
         if all(silo.is_done for silo in silos):
             log["aggregated/all_silos_done"] = 1
@@ -486,9 +537,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         elapsed = time.time() - t0
         _print_round(round_num, cfg.max_rounds, log, elapsed)
 
-    # ── Distribute final global model to all silos ────────────────────────────
+    # ── Distribute final global models (doctor + nurse) to all silos ─────────
     for silo in silos:
         silo.set_weights(global_weights)
+        silo.set_nurse_weights(global_nurse_weights)
 
     run.finish()
 
@@ -557,6 +609,591 @@ def _print_round(round_num: int, max_rounds: int, log: dict, elapsed: float) -> 
     )
 
 
+# ── Flower backend ────────────────────────────────────────────────────────────
+
+def run_flower_federated_training(
+    cfg: FLTrainConfig | None = None,
+    _shared_tracker=None,
+    **kwargs,
+) -> list[WorldEngine]:
+    """
+    Flower-protocol federated training (in-process, no gRPC).
+
+    Uses Flower's NumPyClient.fit() + WandBFedAvg.aggregate_fit() for the
+    round protocol, driving all clients and aggregation in-process.
+    World state (SIR model, LoRA adapters) persists between rounds.
+
+    Callable via run_federated_training(cfg) when cfg.fl_backend == "flower",
+    or directly.  W&B keys are identical to the inprocess backend so dashboards
+    are directly comparable.
+    """
+    if cfg is None:
+        cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
+                                if k in FLTrainConfig.__dataclass_fields__})
+
+    try:
+        from flwr.common import (
+            ndarrays_to_parameters, parameters_to_ndarrays,
+            FitRes, Status, Code,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "Flower not installed. Run: pip install 'flwr[simulation]>=1.8'"
+        ) from exc
+
+    import wandb
+    from simulation.strategies import STRATEGIES
+    from fl.server import WandBFedAvg, InProcessClientProxy
+    from fl.flwr_client import make_flower_client
+    from fl.lora import get_lora_weights as _glw
+
+    # ── W&B initialisation ────────────────────────────────────────────────────
+    if cfg.wandb_offline:
+        import os
+        os.environ["WANDB_MODE"] = "offline"
+
+    wandb_cfg = {k: v for k, v in asdict(cfg).items()
+                 if not k.startswith("wandb_") and k != "world_configs"}
+    run = wandb.init(
+        project = cfg.wandb_project,
+        name    = cfg.wandb_run_name,
+        entity  = cfg.wandb_entity,
+        config  = wandb_cfg,
+        reinit  = "finish_previous",
+    )
+
+    # ── Per-silo on-disk datasets ─────────────────────────────────────────────
+    _run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _dataset_dir = Path(cfg.dataset_dir) / _run_id
+    from fl.dataset import SiloDataset
+    _silo_datasets = [
+        SiloDataset(_dataset_dir, i, cfg.holdout_fraction, cfg.seed)
+        for i in range(cfg.num_silos)
+    ]
+    print(f"  [dataset] {_dataset_dir}/silo_{{0..{cfg.num_silos-1}}}/  "
+          f"holdout={cfg.holdout_fraction:.0%}  cap={cfg.train_sample_cap}")
+
+    # ── World builder ─────────────────────────────────────────────────────────
+    rng_dirichlet = np.random.default_rng(cfg.seed)
+
+    def _make_world(silo_idx: int) -> WorldEngine:
+        wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
+
+        if wc is not None:
+            progs               = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy            = STRATEGIES.get(wc.disease_strategy)
+            end_cond            = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents            = wc.num_agents
+            bg_rate             = wc.background_visit_rate
+            bscale              = wc.beta_scale
+            s_offset            = wc.seed_offset
+            rev_incub_icd       = wc.reveal_incubating_icd
+            n_seeds             = wc.initial_seeds
+            static_mode         = wc.static_mode
+            infectious_fraction = wc.infectious_fraction
+            cases_per_day       = wc.cases_per_day
+        else:
+            unknown = [p for p in cfg.progressions if p not in PROGRESSION_STRATEGIES]
+            if unknown:
+                raise ValueError(
+                    f"Unknown progression(s): {unknown}. "
+                    f"Available: {list(PROGRESSION_STRATEGIES)}"
+                )
+            progs               = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy            = STRATEGIES.get(cfg.disease_strategy)
+            end_cond            = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents            = cfg.num_agents
+            bg_rate             = 0.025
+            bscale              = cfg.beta_scale
+            s_offset            = 0
+            rev_incub_icd       = True
+            n_seeds             = cfg.initial_seeds
+            static_mode         = False
+            infectious_fraction = 0.5
+            cases_per_day       = 20
+
+        if wc is not None and wc.disease_weights is not None:
+            d_weights = wc.disease_weights
+        elif len(progs) > 1 and cfg.dirichlet_alpha > 0:
+            d_weights = rng_dirichlet.dirichlet(
+                [cfg.dirichlet_alpha] * len(progs)
+            ).tolist()
+        else:
+            d_weights = None
+
+        return WorldEngine(
+            num_agents             = n_agents,
+            seed                   = cfg.seed + silo_idx + s_offset,
+            progression_strategies = progs,
+            disease_strategy       = strategy,
+            end_condition          = end_cond,
+            background_visit_rate  = bg_rate,
+            beta_scale             = bscale,
+            reveal_incubating_icd  = rev_incub_icd,
+            initial_seeds          = n_seeds,
+            disease_weights        = d_weights,
+            static_mode            = static_mode,
+            infectious_fraction    = infectious_fraction,
+            cases_per_day          = cases_per_day,
+            lora_config            = cfg.lora_config(),
+            sim_days               = cfg.sim_days,
+            min_events_to_train    = cfg.min_events_to_train,
+            local_epochs           = cfg.local_epochs,
+            batch_size             = cfg.batch_size,
+            lr                     = cfg.lr,
+            dataset                = _silo_datasets[silo_idx],
+            train_sample_cap       = cfg.train_sample_cap,
+            training_device        = cfg.training_device,
+        )
+
+    silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
+
+    # ── Flower clients + strategy ─────────────────────────────────────────────
+    flower_clients = [make_flower_client(silos[i], cid=str(i))
+                      for i in range(cfg.num_silos)]
+
+    # WandBFedAvg handles FedAvg math; W&B logging done in our round loop
+    # so the log structure is identical to the inprocess backend.
+    strategy = WandBFedAvg(
+        wandb_run            = None,
+        fraction_fit         = 1.0,
+        fraction_evaluate    = 0.0,
+        min_fit_clients      = 1,
+        min_evaluate_clients = 0,
+        min_available_clients= 1,
+        initial_parameters   = ndarrays_to_parameters(silos[0].get_weights()),
+    )
+
+    # ── Prototype libraries ───────────────────────────────────────────────────
+    from fl.prototype_library import PrototypeLibrary, federate_libraries
+    proto_libs = [PrototypeLibrary(silo_id=i) for i in range(cfg.num_silos)]
+
+    # ── Stereotype libraries ──────────────────────────────────────────────────
+    from fl.stereotype_library import StereotypeLibrary, aggregate_stereotypes
+    stereo_libs = [StereotypeLibrary() for _ in range(cfg.num_silos)]
+
+    # ── Wire LLM clients ──────────────────────────────────────────────────────
+    ollama_client  = None
+    ollama_active  = False
+    ollama_status  = "disabled"
+    patient_status = "disabled"
+    if cfg.use_ollama:
+        from simulation.ollama_client import OllamaDiagnosticClient
+        from simulation.patient_llm   import PatientLLMClient
+
+        patient_llm = PatientLLMClient(model=cfg.patient_model)
+        if patient_llm.health_check():
+            for silo in silos:
+                silo.set_patient_llm(patient_llm)
+            patient_status = f"active ({patient_llm.model})"
+        else:
+            patient_llm    = None
+            patient_status = f"unreachable — pull: ollama pull {cfg.patient_model}"
+
+        ollama_client = OllamaDiagnosticClient(patient_llm=patient_llm)
+        if ollama_client.health_check():
+            for i, silo in enumerate(silos):
+                q    = silo.clinic_queue
+                _lib = proto_libs[i]
+                silo.register_diagnostic_fn(
+                    lambda ev, _q=q, _lib=_lib: ollama_client.diagnose(
+                        ev, _queue=_q, _proto_lib=_lib)
+                )
+            from transformers import AutoTokenizer
+            from fl.lora import build_model as _build_model
+            _enc_tokenizer = AutoTokenizer.from_pretrained(cfg.lora_config().model_name_or_path)
+            _enc_model     = _build_model(cfg.lora_config()).cpu()
+            ollama_client.set_prototype_library(
+                library       = None,
+                encoder_model = _enc_model,
+                tokenizer     = _enc_tokenizer,
+                k             = 3,
+            )
+            ollama_active = True
+            ollama_status = f"active ({ollama_client.model})"
+        else:
+            ollama_status = "unreachable — using stub oracle"
+
+    prog_summary = ", ".join(cfg.progressions) if not cfg.world_configs else "per-silo (WorldConfig)"
+    print(
+        f"\n{'─'*60}\n"
+        f"  FedWorld FL Training (Flower backend)\n"
+        f"  silos={cfg.num_silos}  max_rounds={cfg.max_rounds}  "
+        f"agents/silo={cfg.num_agents}\n"
+        f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
+        f"local_epochs={cfg.local_epochs}  lr={cfg.lr}\n"
+        f"  progressions={prog_summary}  seed={cfg.seed}\n"
+        f"  end_condition={cfg.end_condition}  (simulation-guided)\n"
+        f"  LLM doctor:  {ollama_status}\n"
+        f"  LLM patient: {patient_status}\n"
+        f"{'─'*60}\n"
+    )
+
+    # ── Report ────────────────────────────────────────────────────────────────
+    from simulation.report import RunReport
+    _report      = RunReport(cfg, _run_id)
+    _report_path = Path(f"reports/run_{_run_id}.html")
+
+    # ── Embedding tracker ─────────────────────────────────────────────────────
+    from viz.embedding_tracker import EmbeddingTracker
+    if _shared_tracker is not None:
+        _tracker      = _shared_tracker
+        _own_tracker  = False
+    else:
+        print("  [embed] Building benchmark probe set…")
+        _embed_dir   = Path(f"viz_output/embeddings/run_{_run_id}")
+        _tracker     = EmbeddingTracker(_embed_dir, cfg.lora_config())
+        _own_tracker = True
+        print(f"  [embed] {len(_tracker.probe_events)} probe events ready "
+              f"({len(set(e.ground_truth for e in _tracker.probe_events))} unique labels)\n")
+
+    # ── Initialise global weights (doctor + nurse) ────────────────────────────
+    global_weights       = silos[0].get_weights()
+    global_nurse_weights = silos[0].get_nurse_weights()
+    silos[0].release_model()
+
+    _known_stereo_labels: set[str] = set()   # tracks growth across rounds
+
+    # ── FL rounds ────────────────────────────────────────────────────────────
+    for round_num in range(1, cfg.max_rounds + 1):
+        t0 = time.time()
+
+        fit_results:   list[tuple]  = []
+        log:           dict         = {"round": round_num}
+        agg_loss = agg_n = agg_trained = 0.0
+        snap_fed_weights:   list = []
+        snap_local_weights: list = []
+        round_trained: list[bool] = []
+
+        for i, (silo, client) in enumerate(zip(silos, flower_clients)):
+            # Pass weights as List[np.ndarray] — NumPyClient.fit() expects ndarrays
+            # (Flower's NumPyClientWrapper does this conversion in real deployment;
+            # here we call fit() directly so we skip the wrapper).
+            weights_out, n_examples, metrics = client.fit(
+                global_weights, {"round_num": round_num}
+            )
+
+            # Capture local weights before release (Bug 2 fix: saved in learner)
+            local_w = _glw(silo.learner.local_model)
+            snap_fed_weights.append(weights_out)
+            snap_local_weights.append(local_w)
+            silo.release_model()
+
+            proxy   = InProcessClientProxy(str(i))
+            fit_res = FitRes(
+                status      = Status(code=Code.OK, message=""),
+                parameters  = ndarrays_to_parameters(weights_out),
+                num_examples= n_examples,
+                metrics     = metrics,
+            )
+            fit_results.append((proxy, fit_res))
+
+            did_train = bool(metrics.get("trained", 0))
+            round_trained.append(did_train)
+
+            for key, val in metrics.items():
+                if key == "silo_id":
+                    continue
+                log[f"silo_{i}/{key}"] = val
+
+            if silo.is_done:
+                log[f"silo_{i}/done"]        = 1
+                log[f"silo_{i}/stop_reason"] = silo.stop_reason or "done"
+
+            n = n_examples
+            if n > 0 and did_train:
+                loss_v = metrics.get("loss", -1.0)
+                if loss_v != -1.0:
+                    agg_loss += loss_v * n
+                agg_n       += n
+                agg_trained += metrics.get("trained_on", 0)
+                for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
+                            "combined_acc", "triage_macro_f1", "danger_rate",
+                            "avg_turns", "first_turn_rate", "action_accuracy",
+                            "fp_escalation_rate", "local_triage_acc", "local_diag_acc",
+                            "fl_gain", "fl_diag_gain"):
+                    v = metrics.get(sub, -1.0)
+                    if v != -1.0:
+                        agg_key = f"aggregated/{sub}"
+                        log[agg_key] = log.get(agg_key, 0.0) + v * n
+
+        # ── Flower FedAvg aggregation ─────────────────────────────────────────
+        # Done silos pass n_examples=0, so aggregate_fit naturally excludes them.
+        active_fit_results = [(p, r) for p, r in fit_results if r.num_examples > 0]
+        if active_fit_results:
+            agg_params, _ = strategy.aggregate_fit(round_num, active_fit_results, [])
+            if agg_params is not None:
+                global_weights = parameters_to_ndarrays(agg_params)
+
+        log["aggregated/silos_trained"] = sum(round_trained)
+
+        # ── Embedding snapshot ────────────────────────────────────────────────
+        _tracker.snapshot(round_num, global_weights,
+                          silo_fed_weights=snap_fed_weights,
+                          silo_local_weights=snap_local_weights)
+
+        # ── Federated few-shot update ─────────────────────────────────────────
+        if ollama_active and ollama_client is not None:
+            round_events = [ev for silo in silos for ev in silo.last_round_events]
+            ollama_client.update_examples(round_events)
+            log["aggregated/llm_few_shot_examples"] = ollama_client.num_examples()
+
+        # ── Prototype library ─────────────────────────────────────────────────
+        if ollama_active and ollama_client is not None and ollama_client._proto_encoder is not None:
+            enc_model, enc_tok = ollama_client._proto_encoder
+            for i, silo in enumerate(silos):
+                added = proto_libs[i].add_from_events(
+                    silo.last_round_events, enc_model, enc_tok,
+                    round_num, device="cpu",
+                )
+                log[f"silo_{i}/proto_added"] = added
+                log[f"silo_{i}/proto_size"]  = proto_libs[i].size()
+            global_protos = federate_libraries(proto_libs, max_per_label=10)
+            for lib in proto_libs:
+                lib.merge(global_protos)
+            log["aggregated/proto_total"] = sum(l.size() for l in proto_libs)
+
+            # ── Stereotype federation ─────────────────────────────────────────
+            for i, silo in enumerate(silos):
+                stereo_libs[i].update_from_events(
+                    silo.last_round_events, enc_model, enc_tok, device="cpu",
+                )
+            global_stereos = aggregate_stereotypes(
+                [l.get_state() for l in stereo_libs]
+            )
+            for lib in stereo_libs:
+                lib.set_global(global_stereos)
+            ollama_client.update_global_stereotypes(global_stereos,
+                                                    n_silos=cfg.num_silos)
+            _new_labels = [l for l in global_stereos if l not in _known_stereo_labels]
+            _known_stereo_labels.update(global_stereos.keys())
+            log["aggregated/stereo_classes"]     = len(global_stereos)
+            log["aggregated/stereo_new_classes"] = len(_new_labels)
+            if _new_labels:
+                print(f"  [stereo] New class centroid(s) federated: {sorted(_new_labels)}")
+
+        # ── Early exit ────────────────────────────────────────────────────────
+        if all(silo.is_done for silo in silos):
+            log["aggregated/all_silos_done"] = 1
+            run.log(log, step=round_num)
+            elapsed = time.time() - t0
+            _print_round(round_num, cfg.max_rounds, log, elapsed)
+            _report.add_round(round_num, log, [s.last_round_events for s in silos])
+            reasons = [silo.stop_reason or "done" for silo in silos]
+            print(f"\n  All silos finished: {reasons[0]}")
+            break
+
+        # ── Aggregated log ────────────────────────────────────────────────────
+        if agg_n > 0:
+            log["aggregated/loss"]         = agg_loss / agg_n
+            log["aggregated/num_examples"] = int(agg_n)
+            log["aggregated/num_trained"]  = int(agg_trained)
+            for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
+                        "combined_acc", "triage_macro_f1", "danger_rate",
+                        "avg_turns", "first_turn_rate", "action_accuracy",
+                        "fp_escalation_rate", "local_triage_acc", "fl_gain"):
+                k = f"aggregated/{sub}"
+                if k in log:
+                    log[k] /= agg_n
+
+        run.log(log, step=round_num)
+        _report.add_round(round_num, log, [s.last_round_events for s in silos])
+
+        elapsed = time.time() - t0
+        _print_round(round_num, cfg.max_rounds, log, elapsed)
+
+    # ── Distribute final global models (doctor + nurse) ─────────────────────
+    for silo in silos:
+        silo.set_weights(global_weights)
+        silo.set_nurse_weights(global_nurse_weights)
+
+    run.finish()
+
+    if _own_tracker:
+        print("  [embed] Generating evolution plots…")
+        embed_plots = _tracker.save_plots()
+        for p in embed_plots:
+            print(f"  [embed] {p.resolve()}")
+
+    _report.write(_report_path, tracker=_tracker if _own_tracker else None)
+
+    run_ref = run.url or f"offline — sync with: wandb sync {run.dir}"
+    print(f"\nTraining complete. W&B: {run_ref}")
+    print(f"Report:           {_report_path.resolve()}\n")
+    return silos
+
+
+# ── Local-only baseline ───────────────────────────────────────────────────────
+
+def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[WorldEngine]:
+    """
+    Local-only baseline: each silo trains its own LoRA adapter independently.
+    No FedAvg, no weight sharing.  Reports the local shadow model's metrics as
+    the primary output so results are directly comparable to the federated run.
+
+    The local shadow model is already trained inside run_round() via train_local();
+    this loop simply skips set_weights() / FedAvg and promotes local_* metrics.
+
+    W&B keys mirror the federated run exactly so W&B overlay comparison works:
+      aggregated/triage_acc  ← local model severity accuracy (not fed model)
+      aggregated/diag_acc    ← local model disease accuracy
+      aggregated/fl_gain     ← always 0.0 (no federation; useful as a flat baseline line)
+    """
+    if cfg is None:
+        cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
+                                if k in FLTrainConfig.__dataclass_fields__})
+
+    import wandb
+    from simulation.strategies import STRATEGIES
+
+    if cfg.wandb_offline:
+        import os
+        os.environ["WANDB_MODE"] = "offline"
+
+    wandb_cfg = {k: v for k, v in asdict(cfg).items()
+                 if not k.startswith("wandb_") and k != "world_configs"}
+    run = wandb.init(
+        project = cfg.wandb_project,
+        name    = cfg.wandb_run_name or "local_only",
+        entity  = cfg.wandb_entity,
+        config  = wandb_cfg,
+        reinit  = "finish_previous",
+    )
+
+    _run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _dataset_dir = Path(cfg.dataset_dir) / _run_id
+    from fl.dataset import SiloDataset
+    _silo_datasets = [
+        SiloDataset(_dataset_dir, i, cfg.holdout_fraction, cfg.seed)
+        for i in range(cfg.num_silos)
+    ]
+    rng_dirichlet = np.random.default_rng(cfg.seed)
+
+    def _make_world(silo_idx: int) -> WorldEngine:
+        wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
+        if wc is not None:
+            progs               = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy            = STRATEGIES.get(wc.disease_strategy)
+            end_cond            = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents, bg_rate   = wc.num_agents, wc.background_visit_rate
+            bscale, s_offset    = wc.beta_scale, wc.seed_offset
+            n_seeds             = wc.initial_seeds
+        else:
+            progs    = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy = STRATEGIES.get(cfg.disease_strategy)
+            end_cond = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents, bg_rate = cfg.num_agents, 0.025
+            bscale, s_offset  = cfg.beta_scale, 0
+            n_seeds           = cfg.initial_seeds
+
+        if wc is not None and wc.disease_weights is not None:
+            d_weights = wc.disease_weights
+        elif len(progs) > 1 and cfg.dirichlet_alpha > 0:
+            d_weights = rng_dirichlet.dirichlet([cfg.dirichlet_alpha] * len(progs)).tolist()
+        else:
+            d_weights = None
+        return WorldEngine(
+            num_agents             = n_agents,
+            seed                   = cfg.seed + silo_idx + s_offset,
+            progression_strategies = progs,
+            disease_strategy       = strategy,
+            end_condition          = end_cond,
+            background_visit_rate  = bg_rate,
+            beta_scale             = bscale,
+            initial_seeds          = n_seeds,
+            disease_weights        = d_weights,
+            lora_config            = cfg.lora_config(),
+            sim_days               = cfg.sim_days,
+            min_events_to_train    = cfg.min_events_to_train,
+            local_epochs           = cfg.local_epochs,
+            batch_size             = cfg.batch_size,
+            lr                     = cfg.lr,
+            dataset                = _silo_datasets[silo_idx],
+            train_sample_cap       = cfg.train_sample_cap,
+            training_device        = cfg.training_device,
+        )
+
+    silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
+
+    prog_summary = ", ".join(cfg.progressions) if not cfg.world_configs else "per-silo (WorldConfig)"
+    print(
+        f"\n{'─'*60}\n"
+        f"  FedWorld Local-Only Training (no federation)\n"
+        f"  silos={cfg.num_silos}  max_rounds={cfg.max_rounds}  agents/silo={cfg.num_agents}\n"
+        f"  sim_days={cfg.sim_days}  min_events={cfg.min_events_to_train}  "
+        f"local_epochs={cfg.local_epochs}\n"
+        f"  progressions={prog_summary}  seed={cfg.seed}\n"
+        f"  [dataset] {_dataset_dir}/  holdout={cfg.holdout_fraction:.0%}  cap={cfg.train_sample_cap}\n"
+        f"{'─'*60}\n"
+    )
+
+    for round_num in range(1, cfg.max_rounds + 1):
+        t0 = time.time()
+        log: dict = {"round": round_num}
+        agg_triage = agg_diag = agg_n = agg_trained = agg_loss = 0.0
+
+        for i, silo in enumerate(silos):
+            # run_round() trains both the federated model (ignored here) and the
+            # local shadow model.  We deliberately do NOT call set_weights() so
+            # each silo's federated model also never receives global weights.
+            m = silo.run_round(round_num=round_num)
+            silo.release_model()
+
+            n        = m.get("num_examples", 0)
+            did_train = bool(m.get("trained", 0))
+
+            # Promote local metrics to primary slot so the W&B key names align
+            # with the federated run for easy overlay.
+            local_tr  = m.get("local_triage_acc", float("nan"))
+            local_dg  = m.get("local_diag_acc",   float("nan"))
+            m["triage_acc"] = local_tr
+            m["diag_acc"]   = local_dg
+            m["fl_gain"]    = 0.0   # flat baseline reference line
+
+            epoch_losses = m.pop("epoch_losses", [])
+            for key, val in m.items():
+                if isinstance(val, (int, float)):
+                    log[f"silo_{i}/{key}"] = val
+            if epoch_losses:
+                log[f"silo_{i}/train_loss_final"] = epoch_losses[-1]
+
+            if n > 0 and did_train and local_tr == local_tr:
+                agg_loss   += m.get("loss", 0.0) * n
+                agg_triage += local_tr * n
+                agg_diag   += local_dg * n if local_dg == local_dg else 0.0
+                agg_trained += m.get("trained_on", 0)
+                agg_n       += n
+
+        if all(s.is_done for s in silos):
+            log["aggregated/all_silos_done"] = 1
+            run.log(log, step=round_num)
+            print(f"  Round {round_num:>3} | all silos done | {time.time()-t0:.1f}s")
+            break
+
+        if agg_n > 0:
+            log["aggregated/loss"]        = agg_loss   / agg_n
+            log["aggregated/triage_acc"]  = agg_triage / agg_n
+            log["aggregated/diag_acc"]    = agg_diag   / agg_n
+            log["aggregated/fl_gain"]     = 0.0
+            log["aggregated/num_examples"] = int(agg_n)
+            log["aggregated/num_trained"]  = int(agg_trained)
+
+        run.log(log, step=round_num)
+        elapsed = time.time() - t0
+        nan = float("nan")
+        print(
+            f"  Round {round_num:>3}/~{cfg.max_rounds} | "
+            f"loss={log.get('aggregated/loss', nan):.4f} "
+            f"local_tr={log.get('aggregated/triage_acc', nan):.2f} "
+            f"local_dg={log.get('aggregated/diag_acc', nan):.2f} "
+            f"n={int(agg_trained):>4} | {elapsed:.1f}s"
+        )
+
+    run.finish()
+    print(f"\nLocal-only training complete. W&B: {run.url or 'offline'}\n")
+    return silos
+
+
 # ── Centralized baseline ──────────────────────────────────────────────────────
 
 def run_centralized_training(
@@ -617,10 +1254,12 @@ def run_centralized_training(
             n_agents, bg_rate, bscale = cfg.num_agents, 0.025, cfg.beta_scale
             s_offset, rev_icd, n_seeds = 0, True, cfg.initial_seeds
 
-        d_weights = (
-            rng_dirichlet.dirichlet([cfg.dirichlet_alpha] * len(progs)).tolist()
-            if len(progs) > 1 and cfg.dirichlet_alpha > 0 else None
-        )
+        if wc is not None and wc.disease_weights is not None:
+            d_weights = wc.disease_weights
+        elif len(progs) > 1 and cfg.dirichlet_alpha > 0:
+            d_weights = rng_dirichlet.dirichlet([cfg.dirichlet_alpha] * len(progs)).tolist()
+        else:
+            d_weights = None
         return WorldEngine(
             num_agents=n_agents, seed=cfg.seed + silo_idx + s_offset,
             progression_strategies=progs, disease_strategy=strategy,
@@ -640,6 +1279,8 @@ def run_centralized_training(
         lr                  = cfg.lr,
         min_events_to_train = cfg.min_events_to_train,
         sim_days            = cfg.sim_days,
+        train_sample_cap    = cfg.train_sample_cap,
+        device              = cfg.training_device,
     )
 
     # ── Report ────────────────────────────────────────────────────────────────
@@ -691,18 +1332,18 @@ def run_centralized_training(
                 cls, logits = _tracker._extract(cen_weights)
                 existing["centralized"] = {"cls": cls, "logits": logits}
                 _tracker._save_round_npz(round_num, existing)
-        trainer.release_model()
+        # Model is NOT released here — it must persist so trained weights
+        # carry over to the next round. release_model() is called once after
+        # the loop ends (see below).
 
         log = {
-            "round":                        round_num,
-            "centralized/triage_acc":       m.triage_acc,
-            "centralized/diag_acc":         m.diag_acc,
-            "centralized/combined_acc":     m.combined_acc,
-            "centralized/triage_macro_f1":  m.triage_macro_f1,
-            "centralized/danger_rate":      m.danger_rate,
-            "centralized/num_events":       m.num_events,
-            "centralized/trained_on":       m.trained_on,
-            "centralized/loss":             m.loss,
+            "round":                    round_num,
+            "centralized/triage_acc":   m.triage_acc,
+            "centralized/diag_acc":     m.diag_acc,
+            "centralized/danger_rate":  m.danger_rate,
+            "centralized/num_events":   m.num_events,
+            "centralized/trained_on":   m.trained_on,
+            "centralized/loss":         m.loss,
         }
         run.log(log, step=round_num)
         _report.add_round(round_num, log, [s.last_round_events for s in silos])
@@ -711,7 +1352,7 @@ def run_centralized_training(
         print(
             f"  Round {round_num:>3}/~{cfg.max_rounds} | "
             f"loss={m.loss:.4f} tr={_f(m.triage_acc)} diag={_f(m.diag_acc)} "
-            f"f1={_f(m.triage_macro_f1)} danger={_f(m.danger_rate)} "
+            f"danger={_f(m.danger_rate)} "
             f"ev={m.num_events} trained_on={m.trained_on} | {m.elapsed:.1f}s"
         )
 
@@ -719,6 +1360,7 @@ def run_centralized_training(
             print(f"\n  All silos finished (centralized).")
             break
 
+    trainer.release_model()   # free once, after all rounds complete
     run.finish()
 
     if _own_tracker:
@@ -730,6 +1372,328 @@ def run_centralized_training(
     print(f"Report: {_report_path.resolve()}")
 
     return trainer
+
+
+def run_static_training(
+    cfg: FLTrainConfig | None = None,
+    mode: str = "centralized",
+    **kwargs,
+) -> dict:
+    """
+    Two-phase static baseline: simulate first, train after.
+
+    Phase 1 — run all N worlds to completion via step_tick() (pure SIR +
+               Ollama diagnosis, no LoRA, no weight communication).
+    Phase 2 — train on the collected events:
+        mode='centralized' — pool all silo events, train one shared model.
+        mode='local'       — train one model per silo on its own events only.
+
+    Each silo's events are randomly split 80/20 (train/holdout) before
+    training begins, so evaluation is always on unseen data.
+
+    Returns dict with keys: mode, silo_results (list[dict]), log (W&B dict).
+    """
+    if cfg is None:
+        cfg = FLTrainConfig(**{k: v for k, v in kwargs.items()
+                                if k in FLTrainConfig.__dataclass_fields__})
+
+    import random
+    import torch
+    from torch.optim import AdamW
+    from torch.utils.data import DataLoader, TensorDataset
+    import wandb
+    from simulation.strategies import STRATEGIES
+    from transformers import AutoTokenizer
+    from fl.lora import build_model
+    from fl.learner import build_label_map, _split_label
+
+    label2id, id2label = build_label_map()
+    prefix = "static_centralized" if mode == "centralized" else "static_local"
+
+    if cfg.wandb_offline:
+        import os
+        os.environ["WANDB_MODE"] = "offline"
+
+    wandb_cfg = {k: v for k, v in asdict(cfg).items()
+                 if not k.startswith("wandb_") and k != "world_configs"}
+    wandb_cfg["static_mode"] = mode
+    run = wandb.init(
+        project = cfg.wandb_project,
+        name    = cfg.wandb_run_name or prefix,
+        entity  = cfg.wandb_entity,
+        config  = wandb_cfg,
+        reinit  = "finish_previous",
+    )
+
+    # ── World builder (no lora_config — no FL learner needed during sim) ─────
+    rng_dirichlet = np.random.default_rng(cfg.seed)
+
+    def _make_world(silo_idx: int) -> WorldEngine:
+        wc = cfg.world_configs[silo_idx] if cfg.world_configs else None
+        if wc is not None:
+            progs               = [PROGRESSION_STRATEGIES[p] for p in wc.progressions]
+            strategy            = STRATEGIES.get(wc.disease_strategy)
+            end_cond            = end_condition_from_config(wc.end_condition, wc.end_condition_param)
+            n_agents            = wc.num_agents
+            bg_rate             = wc.background_visit_rate
+            bscale              = wc.beta_scale
+            s_offset            = wc.seed_offset
+            rev_icd             = wc.reveal_incubating_icd
+            n_seeds             = wc.initial_seeds
+            static_mode         = wc.static_mode
+            infectious_fraction = wc.infectious_fraction
+            cases_per_day       = wc.cases_per_day
+        else:
+            progs               = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
+            strategy            = STRATEGIES.get(cfg.disease_strategy)
+            end_cond            = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
+            n_agents            = cfg.num_agents
+            bg_rate             = 0.025
+            bscale              = cfg.beta_scale
+            s_offset            = 0
+            rev_icd             = True
+            n_seeds             = cfg.initial_seeds
+            static_mode         = False
+            infectious_fraction = 0.5
+            cases_per_day       = 20
+
+        if wc is not None and wc.disease_weights is not None:
+            d_weights = wc.disease_weights
+        elif len(progs) > 1 and cfg.dirichlet_alpha > 0:
+            d_weights = rng_dirichlet.dirichlet([cfg.dirichlet_alpha] * len(progs)).tolist()
+        else:
+            d_weights = None
+
+        return WorldEngine(
+            num_agents             = n_agents,
+            seed                   = cfg.seed + silo_idx + s_offset,
+            progression_strategies = progs,
+            disease_strategy       = strategy,
+            end_condition          = end_cond,
+            background_visit_rate  = bg_rate,
+            beta_scale             = bscale,
+            reveal_incubating_icd  = rev_icd,
+            initial_seeds          = n_seeds,
+            disease_weights        = d_weights,
+            static_mode            = static_mode,
+            infectious_fraction    = infectious_fraction,
+            cases_per_day          = cases_per_day,
+        )
+
+    silos: list[WorldEngine] = [_make_world(i) for i in range(cfg.num_silos)]
+
+    # ── Ollama setup ──────────────────────────────────────────────────────────
+    ollama_status  = "disabled"
+    patient_status = "disabled"
+    if cfg.use_ollama:
+        from simulation.ollama_client import OllamaDiagnosticClient
+        from simulation.patient_llm   import PatientLLMClient
+        patient_llm = PatientLLMClient(model=cfg.patient_model)
+        if patient_llm.health_check():
+            for silo in silos:
+                silo.set_patient_llm(patient_llm)
+            patient_status = f"active ({patient_llm.model})"
+        else:
+            patient_llm    = None
+            patient_status = f"unreachable — pull: ollama pull {cfg.patient_model}"
+        ollama_client = OllamaDiagnosticClient(patient_llm=patient_llm)
+        if ollama_client.health_check():
+            for silo in silos:
+                q = silo.clinic_queue
+                silo.register_diagnostic_fn(
+                    lambda ev, _q=q: ollama_client.diagnose(ev, _queue=_q))
+            ollama_status = f"active ({ollama_client.model})"
+        else:
+            ollama_status = "unreachable — using stub oracle"
+
+    prog_summary = ", ".join(cfg.progressions) if not cfg.world_configs else "per-silo (WorldConfig)"
+    label = "Centralized Static" if mode == "centralized" else "Local Static"
+    print(
+        f"\n{'─'*60}\n"
+        f"  FedWorld {label} Training\n"
+        f"  silos={cfg.num_silos}  agents/silo={cfg.num_agents}  "
+        f"end={cfg.end_condition}\n"
+        f"  epochs={cfg.local_epochs}  lr={cfg.lr}  batch={cfg.batch_size}  "
+        f"holdout=20%\n"
+        f"  progressions={prog_summary}  seed={cfg.seed}\n"
+        f"  LLM doctor: {ollama_status}  patient: {patient_status}\n"
+        f"{'─'*60}\n"
+    )
+
+    # ── Phase 1: simulate all worlds to completion ────────────────────────────
+    print("  Phase 1 — running simulations…")
+    all_silo_events: list[list] = []
+    for i, silo in enumerate(silos):
+        t0 = time.time()
+        while not silo.is_done:
+            silo.step_tick()
+        events = list(silo.clinic_queue.processed)
+        all_silo_events.append(events)
+        sir = silo.sir_model
+        print(f"    silo {i:>2}: {len(events):>4} events  "
+              f"S={sir.S:>3} I={sir.I:>3} R={sir.R:>3}  "
+              f"stop={silo.stop_reason or 'done'}  {time.time()-t0:.1f}s")
+
+    total_events = sum(len(e) for e in all_silo_events)
+    print(f"  Total events: {total_events}\n")
+
+    # ── Shared tokenizer and helpers ──────────────────────────────────────────
+    lora_cfg = cfg.lora_config()
+    tokenizer = AutoTokenizer.from_pretrained(lora_cfg.model_name_or_path)
+
+    def _extract(events: list) -> tuple[list[str], list[int]]:
+        texts, labels = [], []
+        for ev in events:
+            lid = label2id.get(ev.ground_truth or "")
+            if lid is None:
+                continue
+            turns = [t["text"] for t in ev.conversation if t["role"] == "patient"]
+            if not turns:
+                continue
+            texts.append(turns[-1])
+            labels.append(lid)
+        return texts, labels
+
+    def _train_eval(train_events: list, eval_events: list, tag: str) -> dict:
+        train_texts, train_labels = _extract(train_events)
+        eval_texts,  eval_labels  = _extract(eval_events)
+
+        model       = build_model(lora_cfg).to(cfg.training_device)
+        epoch_losses: list[float] = []
+
+        if len(train_texts) >= cfg.min_events_to_train:
+            enc     = tokenizer(train_texts, padding=True, truncation=True,
+                                max_length=128, return_tensors="pt")
+            label_t = torch.tensor(train_labels, dtype=torch.long)
+            loader  = DataLoader(
+                TensorDataset(enc["input_ids"], enc["attention_mask"], label_t),
+                batch_size=cfg.batch_size, shuffle=True,
+            )
+            model.train()
+            opt = AdamW([p for p in model.parameters() if p.requires_grad], lr=cfg.lr)
+            for _ in range(cfg.local_epochs):
+                batch_losses = []
+                for iids, amask, blabels in loader:
+                    iids    = iids.to(cfg.training_device)
+                    amask   = amask.to(cfg.training_device)
+                    blabels = blabels.to(cfg.training_device)
+                    opt.zero_grad()
+                    out = model(input_ids=iids, attention_mask=amask, labels=blabels)
+                    out.loss.backward()
+                    opt.step()
+                    batch_losses.append(out.loss.detach().item())
+                epoch_losses.append(sum(batch_losses) / len(batch_losses))
+
+        m = {"triage_acc": float("nan"), "diag_acc": float("nan"),
+             "danger_rate": float("nan"), "n_eval": 0,
+             "n_train": len(train_texts), "epoch_losses": epoch_losses}
+
+        if eval_texts:
+            enc     = tokenizer(eval_texts, padding=True, truncation=True,
+                                max_length=128, return_tensors="pt")
+            label_t = torch.tensor(eval_labels, dtype=torch.long).to(cfg.training_device)
+            model.eval()
+            with torch.no_grad():
+                out = model(input_ids=enc["input_ids"].to(cfg.training_device),
+                            attention_mask=enc["attention_mask"].to(cfg.training_device),
+                            labels=label_t)
+            preds = out.logits.argmax(dim=-1).cpu().tolist()
+            n = len(preds)
+            sev_ok = diag_ok = danger = n_severe = 0
+            for pred_idx, true_idx in zip(preds, eval_labels):
+                pred_d, pred_s = _split_label(id2label[pred_idx])
+                true_d, true_s = _split_label(id2label[true_idx])
+                sev_ok  += pred_s == true_s
+                diag_ok += pred_d == true_d
+                if true_s == "severe":
+                    n_severe += 1
+                    if pred_s != "severe" or id2label[pred_idx] == "non-infectious":
+                        danger += 1
+            m.update({
+                "triage_acc":  sev_ok  / n,
+                "diag_acc":    diag_ok / n,
+                "danger_rate": danger  / n_severe if n_severe > 0 else float("nan"),
+                "n_eval":      n,
+            })
+
+        _f = lambda v: f"{v:.3f}" if v == v else "—"
+        loss_curve = " → ".join(f"{l:.4f}" for l in epoch_losses) or "—"
+        print(f"    {tag:>20} | train={m['n_train']:>4}  eval={m['n_eval']:>3}  "
+              f"loss=[{loss_curve}]  "
+              f"triage={_f(m['triage_acc'])}  diag={_f(m['diag_acc'])}  "
+              f"danger={_f(m['danger_rate'])}")
+        return m
+
+    # ── Phase 2: train ────────────────────────────────────────────────────────
+    print("  Phase 2 — training…\n")
+    rng_split = random.Random(cfg.seed)
+
+    def _split(events: list) -> tuple[list, list]:
+        shuffled = list(events)
+        rng_split.shuffle(shuffled)
+        n_holdout = max(1, int(len(shuffled) * 0.2))
+        return shuffled[n_holdout:], shuffled[:n_holdout]
+
+    log: dict  = {}
+    silo_results: list[dict] = []
+
+    t_train = time.time()
+    if mode == "centralized":
+        train_pool, eval_pool = [], []
+        for events in all_silo_events:
+            tr, ev = _split(events)
+            train_pool.extend(tr)
+            eval_pool.extend(ev)
+        m = _train_eval(train_pool, eval_pool, "pooled (all silos)")
+        silo_results.append(m)
+        for k in ("triage_acc", "diag_acc", "danger_rate", "n_train", "n_eval"):
+            log[f"{prefix}/{k}"] = m[k]
+        for ep_i, loss in enumerate(m["epoch_losses"]):
+            log[f"{prefix}/epoch_{ep_i}_loss"] = loss
+        if m["epoch_losses"]:
+            log[f"{prefix}/final_loss"] = m["epoch_losses"][-1]
+    else:
+        for i, events in enumerate(all_silo_events):
+            train_ev, eval_ev = _split(events)
+            m = _train_eval(train_ev, eval_ev, f"silo {i}")
+            silo_results.append(m)
+            for k in ("triage_acc", "diag_acc", "danger_rate", "n_train", "n_eval"):
+                log[f"silo_{i}/{k}"] = m[k]
+            for ep_i, loss in enumerate(m["epoch_losses"]):
+                log[f"silo_{i}/epoch_{ep_i}_loss"] = loss
+            if m["epoch_losses"]:
+                log[f"silo_{i}/final_loss"] = m["epoch_losses"][-1]
+
+        valid    = [m for m in silo_results if m["n_eval"] > 0 and m["triage_acc"] == m["triage_acc"]]
+        dr_valid = [m for m in valid if m["danger_rate"] == m["danger_rate"]]
+        if valid:
+            log[f"{prefix}/macro_triage_acc"] = sum(m["triage_acc"] for m in valid) / len(valid)
+            log[f"{prefix}/macro_diag_acc"]   = sum(m["diag_acc"]   for m in valid) / len(valid)
+        if dr_valid:
+            log[f"{prefix}/macro_danger_rate"] = sum(m["danger_rate"] for m in dr_valid) / len(dr_valid)
+
+    log[f"{prefix}/total_events"] = total_events
+    run.log(log)
+    run.finish()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    _f = lambda v: f"{v:.3f}" if v == v else "—"
+    elapsed = time.time() - t_train
+    print(f"\n{'─'*60}")
+    print(f"  {label} — done in {elapsed:.1f}s")
+    if mode == "centralized":
+        m = silo_results[0]
+        print(f"  triage={_f(m['triage_acc'])}  diag={_f(m['diag_acc'])}  "
+              f"danger={_f(m['danger_rate'])}  "
+              f"(train={m['n_train']}  eval={m['n_eval']})")
+    else:
+        ma_tr = log.get(f"{prefix}/macro_triage_acc", float("nan"))
+        ma_dg = log.get(f"{prefix}/macro_diag_acc",   float("nan"))
+        ma_dr = log.get(f"{prefix}/macro_danger_rate", float("nan"))
+        print(f"  macro triage={_f(ma_tr)}  diag={_f(ma_dg)}  danger={_f(ma_dr)}")
+    print(f"{'─'*60}\n")
+
+    return {"mode": mode, "silo_results": silo_results, "log": log}
 
 
 def run_comparison(cfg: FLTrainConfig | None = None, **kwargs) -> dict:
@@ -797,11 +1761,17 @@ def _parse_args() -> FLTrainConfig:
     p.add_argument("--batch-size",  type=int,   default=8)
     p.add_argument("--lr",          type=float, default=1e-4)
     p.add_argument("--lora-rank",   type=int,   default=8)
-    p.add_argument("--progressions", nargs="+", default=["Standard Flu"],
+    p.add_argument("--progressions", nargs="+", default=["Influenza"],
                    help="One or more disease progressions circulating in all silos")
-    p.add_argument("--disease-strategy", type=str, default="Standard Flu",
+    p.add_argument("--disease-strategy", type=str, default="Influenza",
                    dest="disease_strategy")
     p.add_argument("--seed",                type=int,   default=42)
+    p.add_argument("--beta-scale",          type=float, default=1.0,
+                   dest="beta_scale",
+                   help="Multiply BASE_BETA; 1.0 ≈ R0 1.5, 1.2 ≈ R0 1.8")
+    p.add_argument("--initial-seeds",       type=int,   default=3,
+                   dest="initial_seeds",
+                   help="Number of initially infected agents per silo")
     p.add_argument("--end-condition",       type=str,   default="extinction",
                    choices=["horizon", "extinction", "no_susceptibles", "budget"])
     p.add_argument("--end-condition-param", type=int,   default=None,
@@ -828,6 +1798,8 @@ def _parse_args() -> FLTrainConfig:
         min_events_to_train = a.min_events_to_train,
         end_condition       = a.end_condition,
         end_condition_param = a.end_condition_param,
+        beta_scale          = a.beta_scale,
+        initial_seeds       = a.initial_seeds,
         wandb_project       = a.project,
         wandb_run_name      = a.run_name,
         wandb_entity        = a.entity,

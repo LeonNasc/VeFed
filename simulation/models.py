@@ -15,6 +15,14 @@ from simulation.case_table import CaseTable
 REFRACTORY_DAYS = 14
 
 
+def severity_bucket(s: float) -> str:
+    if s >= 0.65:
+        return "severe"
+    if s >= 0.35:
+        return "moderate"
+    return "mild"
+
+
 # ─── Enumerations ────────────────────────────────────────────────────────────
 
 class HealthStatus(Enum):
@@ -137,6 +145,7 @@ class InnerState:
     pain:           float          # 0–10 from CaseTable
     mood:           float          # 0–1; lower = more distressed
     top_vital:      tuple | None   # (variable, value, band) most abnormal vital sign
+    disease_name:   str = "unknown"  # "influenza" | "pneumonia" | "unknown"
 
 
 # ─── DiseaseCloud ─────────────────────────────────────────────────────────────
@@ -231,14 +240,17 @@ class DailySchedule:
 
     def location_for_tick(self, tick: int) -> tuple[str, LocationType]:
         """Return (location_id, LocationType) for the given tick [0..287]."""
-        # Sleep: 0–71 (00:00–06:00), Commute out: 72–83
-        # Work: 84–191 (07:00–16:00), Commute back: 192–203
-        # Third place: 204–239 (17:00–20:00), Home: 240–287
+        # Sleep:          0– 71  (6 h)
+        # Commute out:   72– 95  (2 h — extended for cross-household mixing)
+        # Work:          96–179  (7 h)
+        # Commute back: 180–203  (2 h)
+        # Third place:  204–239  (3 h)
+        # Home evening: 240–287  (4 h)
         if tick < 72:
             return self.home_id,  LocationType.HOME
-        elif tick < 84:
+        elif tick < 96:
             return "commute",     LocationType.COMMUTING
-        elif tick < 192:
+        elif tick < 180:
             return self.work_id,  LocationType.WORK
         elif tick < 204:
             return "commute",     LocationType.COMMUTING
@@ -267,10 +279,16 @@ class DiagnosticEvent:
     personality:    Optional[object] = None   # Personality enum
     conversation:   list = field(default_factory=list)  # [{role, text}]
     case_table:     Optional[object] = None   # CaseTable instance
-    diagnosis:      Optional[str] = None       # LLM's diagnosis text
-    ground_truth:   Optional[str] = None       # Actual diagnosis for accuracy
+    diagnosis:      Optional[str] = None       # LLM's free-text diagnosis note
+    ground_truth:   Optional[str] = None       # Combined "disease/severity" for backward compat
+    # Two-agent split labels (populated alongside ground_truth)
+    gt_disease:     Optional[str] = None       # "influenza" | "pneumonia" | "non-infectious" | "unknown"
+    gt_severity:    Optional[str] = None       # "discharge" | "mild" | "moderate" | "severe" | "critical"
+    # Agent outputs (set by the pipeline after LLM calls)
+    nurse_severity: Optional[str] = None       # triage nurse verdict
+    doctor_disease: Optional[str] = None       # diagnostic doctor verdict
     is_background:  bool          = False      # True for non-infectious background visitors
-    num_turns:      int           = 0          # LLM doctor turns used (0 = no LLM)
+    num_turns:      int           = 0          # total LLM turns across both agents
     complaint_context: Optional[str] = None   # prompt hint for patient LLM (non-infectious only)
 
 
@@ -329,8 +347,8 @@ class Agent:
             elif progression is not None:
                 chosen = progression
             else:
-                from simulation.progression import StandardFluProgression
-                chosen = StandardFluProgression()
+                from simulation.progression import InfluenzaProgression
+                chosen = InfluenzaProgression()
             traj = chosen.sample_trajectory(self._rng)
             self.health_state.infect(traj)
             # MIMIC trajectories carry their own vitals — use MimicCaseTable
@@ -389,6 +407,7 @@ class Agent:
         day = hs.days_infected
         traj = hs._trajectory
         trend = traj.trend if traj is not None else "stable"
+        disease_name = getattr(traj, 'disease_name', 'unknown') if traj is not None else 'unknown'
 
         fatigue    = 0.0
         pain       = 0.0
@@ -406,6 +425,7 @@ class Agent:
             severity=hs.severity, symptoms=hs.symptoms,
             days_infected=day, trend=trend,
             fatigue=fatigue, pain=pain, mood=mood, top_vital=top_vital,
+            disease_name=disease_name,
         )
 
     def _most_abnormal_vital(self, day: int) -> tuple | None:
@@ -438,32 +458,22 @@ class Agent:
         )
 
     def build_diagnostic_event(self) -> DiagnosticEvent:
-        traj = self.health_state._trajectory
-        day  = self.health_state.days_infected
-        icd  = getattr(traj, "icd_code", "B99.9")
-
-        # Management tier derived from disease-specific vital signs via NEWS2 scoring.
-        # This makes the ground-truth label clinically grounded: pneumonia and sepsis
-        # score high even at moderate internal severity; flu at the same severity may
-        # only require home rest because SpO2 and BP are largely preserved.
-        if self._case_table is not None:
-            from simulation.case_table import management_from_vitals
-            management = management_from_vitals(self._case_table, day)
-        else:
-            # Fallback: severity float threshold (agents infected before case table init)
-            s = self.health_state.severity
-            management = "hospitalise" if s >= 0.70 else "treat" if s >= 0.40 else "home rest"
-
-        gt = f"{icd} / {management}"
-
+        traj       = self.health_state._trajectory
+        day        = self.health_state.days_infected
+        s          = self.health_state.severity
+        disease    = getattr(traj, 'disease_name', 'unknown') if traj else 'unknown'
+        sev_bucket = severity_bucket(s)
+        gt         = f"{disease}/{sev_bucket}"
         return DiagnosticEvent(
             agent_id      = self.id,
-            severity      = self.health_state.severity,
+            severity      = s,
             symptoms      = self.health_state.symptoms,
             days_infected = day,
             personality   = self.personality,
             case_table    = self._case_table,
             ground_truth  = gt,
+            gt_disease    = disease,
+            gt_severity   = sev_bucket,
         )
 
     @property
