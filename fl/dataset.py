@@ -16,6 +16,8 @@ def _event_to_record(ev, round_num: int) -> Optional[dict]:
     return {
         "text":          patient_turns[-1],
         "label":         ev.ground_truth,
+        "gt_disease":    getattr(ev, "gt_disease",  None) or "",
+        "gt_severity":   getattr(ev, "gt_severity", None) or "",
         "round":         round_num,
         "severity":      float(ev.severity) if ev.severity is not None else 0.0,
         "is_background": bool(getattr(ev, "is_background", False)),

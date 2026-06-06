@@ -526,7 +526,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                         "combined_acc", "triage_macro_f1", "danger_rate",
                         "avg_turns", "first_turn_rate", "action_accuracy",
-                        "fp_escalation_rate", "local_triage_acc", "fl_gain"):
+                        "fp_escalation_rate", "local_triage_acc", "local_diag_acc",
+                        "fl_gain", "fl_diag_gain"):
                 k = f"aggregated/{sub}"
                 if k in log:
                     log[k] /= agg_n
@@ -991,7 +992,8 @@ def run_flower_federated_training(
             for sub in ("triage_acc", "diag_acc", "icd_exact_acc",
                         "combined_acc", "triage_macro_f1", "danger_rate",
                         "avg_turns", "first_turn_rate", "action_accuracy",
-                        "fp_escalation_rate", "local_triage_acc", "fl_gain"):
+                        "fp_escalation_rate", "local_triage_acc", "local_diag_acc",
+                        "fl_gain", "fl_diag_gain"):
                 k = f"aggregated/{sub}"
                 if k in log:
                     log[k] /= agg_n
