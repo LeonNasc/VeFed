@@ -1,5 +1,5 @@
 """
-WorldEngine — central orchestrator (§4.1, §4.2).
+WorldEngine — pure simulation orchestrator (§4.1, §4.2).
 
 Manages:
   - Discrete-time tick loop (288 ticks × 5 min = 24 h)
@@ -8,6 +8,9 @@ Manages:
   - DiseaseCloud injection and decay
   - End-of-day SIR synchronisation and ClinicQueue population
   - WFC-inspired environment generation
+
+FL training, end conditions, and learner weights are NOT part of WorldEngine.
+They live in fl/silo.py (FLSilo), which wraps this class.
 """
 from __future__ import annotations
 import random
@@ -15,10 +18,9 @@ import string
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Optional
 
-
-from simulation.strategies import DiseaseStrategy, StandardFluStrategy
+from simulation.strategies import DiseaseStrategy, StandardFluStrategy, STRATEGIES
 from simulation.progression import (
     DiseaseProgressionStrategy, InfluenzaProgression,
     PROGRESSION_STRATEGIES,
@@ -29,7 +31,7 @@ from simulation.models import (
     DiagnosticEvent, HealthStatus, Location, LocationType, SIRModel,
     REFRACTORY_DAYS, severity_bucket,
 )
-from simulation.end_conditions import EndCondition
+from simulation.world_config import WorldConfig, AgentConfig, EpidemicConfig
 
 # ─── Wave Function Collapse stub ─────────────────────────────────────────────
 # Full WFC is out of scope; we use a constraint-based random layout that
@@ -44,16 +46,17 @@ _LOC_TYPES = [
 _TYPE_WEIGHTS = [6, 3, 2, 1]   # homes most common
 
 
-def _wfc_generate_locations(n_locations: int, rng: random.Random) -> list[Location]:
+def _wfc_generate_locations(n_locations: int, rng: random.Random,
+                             n_hospitals: int = 1) -> list[Location]:
     """
     Simplified WFC: sample location types with weighted constraints,
-    ensure at least 1 Hospital and 2 Work nodes.
+    ensure exactly n_hospitals Hospital tiles and 2 Work nodes.
     Returns a list of Location objects with (row, col) grid positions.
     """
-    # Guarantee essential tiles
-    types = [LocationType.HOSPITAL, LocationType.WORK, LocationType.WORK]
+    types = [LocationType.HOSPITAL] * n_hospitals + [LocationType.WORK, LocationType.WORK]
     remaining = n_locations - len(types)
-    types += rng.choices(_LOC_TYPES, weights=_TYPE_WEIGHTS, k=remaining)
+    if remaining > 0:
+        types += rng.choices(_LOC_TYPES, weights=_TYPE_WEIGHTS, k=remaining)
     rng.shuffle(types)
 
     cols = max(4, int(n_locations ** 0.5) + 1)
@@ -224,78 +227,82 @@ class WorldEngine:
     # epidemic bridge clusters.
     COMMUTE_SAMPLE_SIZE = 25
 
-    def __init__(self, num_agents: int = 30, seed: int = 0,
-                 disease_strategy: DiseaseStrategy | None = None,
-                 progression_strategy: DiseaseProgressionStrategy | None = None,
-                 progression_strategies: list[DiseaseProgressionStrategy] | None = None,
-                 end_condition: EndCondition | None = None,
-                 background_visit_rate: float = 0.025,
-                 beta_scale: float = 1.0,
-                 reveal_incubating_icd: bool = True,
-                 initial_seeds: int = 3,
-                 disease_weights: list[float] | None = None,
-                 # Static mode — bypasses SIR; visits generated at fixed rate
-                 static_mode: bool = False,
-                 infectious_fraction: float = 0.5,
-                 cases_per_day: int = 20,
-                 # FL parameters — omit for non-FL (TUI/rogue) simulations
-                 lora_config=None,
-                 sim_days: int = 7,
-                 min_events_to_train: int = 10,
-                 local_epochs: int = 3,
-                 batch_size: int = 8,
-                 lr: float = 1e-4,
-                 dataset=None,           # fl.dataset.SiloDataset | None
-                 train_sample_cap: int = 512,
-                 replay_buffer_size: int = 2048,
-                 training_device: str = "cpu"):
-        self._seed   = seed
-        self._rng    = random.Random(seed)
-        self.strategy: DiseaseStrategy = disease_strategy or StandardFluStrategy()
-        self._beta_scale: float = beta_scale
-        self.reveal_incubating_icd: bool = reveal_incubating_icd
-        # Dirichlet-sampled per-silo disease weights; None → uniform selection
-        self._disease_weights: list[float] | None = disease_weights
+    def __init__(
+        self,
+        config: WorldConfig,
+        seed: int = 0,
+        # Shared-world extension: multiple hospital districts in one world.
+        # Each district maps to one FL silo.  Kept here because it governs
+        # how agents are spatially assigned, not how FL trains on them.
+        n_hospitals: int = 1,
+        hospital_disease_weights: list[list[float]] | None = None,
+    ):
+        self._config = config
+        epi   = config.epidemic
+        agents_cfg = config.agents
 
-        # Build the progression list (multi-disease when progression_strategies provided)
-        if progression_strategies:
-            self.progressions: list[DiseaseProgressionStrategy] = list(progression_strategies)
-        elif progression_strategy:
-            self.progressions = [progression_strategy]
-        else:
-            self.progressions = [InfluenzaProgression()]
+        self._seed = seed + config.seed_offset
+        self._rng  = random.Random(self._seed)
+
+        self.strategy: DiseaseStrategy = (
+            STRATEGIES.get(epi.disease_strategy, StandardFluStrategy())
+            if hasattr(epi, "disease_strategy") else StandardFluStrategy()
+        )
+        self._beta_scale           = epi.beta_scale
+        self._contact_rate_sigma   = epi.contact_rate_sigma
+        self._disease_weights      = epi.disease_weights
+        self.reveal_incubating_icd = config.reveal_incubating_icd
+        self.background_visit_rate = agents_cfg.background_visit_rate
+
+        # Resolve progression strategies from names
+        self.progressions: list[DiseaseProgressionStrategy] = [
+            PROGRESSION_STRATEGIES[p] for p in epi.progressions
+            if p in PROGRESSION_STRATEGIES
+        ] or [InfluenzaProgression()]
         self.progression = self.progressions[0]  # backward-compat alias
 
         # ── Generate world via WFC ──────────────────────────────────────
-        n_locs       = max(10, num_agents // 3)
+        n_agents = agents_cfg.num_agents
+        n_locs   = max(10 + n_hospitals - 1, n_agents // 3)
         self.locations: dict[str, Location] = {}
-        for loc in _wfc_generate_locations(n_locs, self._rng):
+        for loc in _wfc_generate_locations(n_locs, self._rng, n_hospitals=n_hospitals):
             self.locations[loc.id] = loc
 
-        # Virtual commute node (no physical tile)
         commute = Location("commute", LocationType.COMMUTING, capacity=999)
         self.locations["commute"] = commute
 
-        # Categorise by type for schedule assignment
         homes     = [l for l in self.locations.values() if l.type == LocationType.HOME]
         works     = [l for l in self.locations.values() if l.type == LocationType.WORK]
         thirds    = [l for l in self.locations.values() if l.type == LocationType.THIRD]
         hospitals = [l for l in self.locations.values() if l.type == LocationType.HOSPITAL]
 
-        self._hospital_id = hospitals[0].id if hospitals else list(self.locations.keys())[0]
+        self._hospital_ids: list[str] = [h.id for h in hospitals] or [list(self.locations.keys())[0]]
+        self._hospital_id = self._hospital_ids[0]
 
         # ── Spawn agents ────────────────────────────────────────────────
-        names       = self._generate_names(num_agents)
+        names = self._generate_names(n_agents)
         self.agents: list[Agent] = []
         self.agents_by_id: dict[str, Agent] = {}
-        for i in range(num_agents):
+        self._agent_disease_weights: dict[str, list[float]] = {}
+        n_hosp = len(self._hospital_ids)
+        for i in range(n_agents):
             h = self._rng.choice(homes)
             w = self._rng.choice(works)
             t = self._rng.choice(thirds) if thirds else h
-            sched     = DailySchedule(home_id=h.id, work_id=w.id, third_id=t.id)
-            threshold = self._rng.uniform(0.15, 0.65)   # γ_a heterogeneity
+            sched       = DailySchedule(home_id=h.id, work_id=w.id, third_id=t.id)
+            threshold   = self._rng.uniform(0.15, 0.65)
             personality = self._rng.choice(list(Personality))
-            agent     = Agent(f"A{i:03d}", names[i], sched, threshold, self._rng, personality)
+            if self._contact_rate_sigma > 0:
+                sigma       = self._contact_rate_sigma
+                sociability = self._rng.lognormvariate(-(sigma ** 2) / 2, sigma)
+            else:
+                sociability = 1.0
+            agent    = Agent(f"A{i:03d}", names[i], sched, threshold, self._rng,
+                             personality, sociability)
+            hosp_idx = i % n_hosp
+            agent.home_hospital_id = self._hospital_ids[hosp_idx]
+            if hospital_disease_weights is not None and hosp_idx < len(hospital_disease_weights):
+                self._agent_disease_weights[agent.id] = hospital_disease_weights[hosp_idx]
             agent.move_to(h.id, LocationType.HOME)
             h.enter(agent.id)
             self.agents.append(agent)
@@ -303,7 +310,7 @@ class WorldEngine:
 
         # ── Seed initial infections ─────────────────────────────────────
         from simulation.case_table import CaseTable
-        seed_agents = self._rng.sample(self.agents, min(initial_seeds, len(self.agents)))
+        seed_agents = self._rng.sample(self.agents, min(epi.initial_seeds, len(self.agents)))
         for seed_agent in seed_agents:
             _prog = self._rng.choices(self.progressions, weights=self._disease_weights)[0]
             _traj = _prog.sample_trajectory(self._rng)
@@ -315,64 +322,29 @@ class WorldEngine:
                 seed_agent._case_table = CaseTable(_traj, self._rng, max_days=90)
 
         # ── Subsystems ──────────────────────────────────────────────────
-        self.current_tick: int         = 0
-        self.current_day:  int         = 0
+        self.current_tick:   int  = 0
+        self.current_day:    int  = 0
         self.disease_clouds: list[DiseaseCloud] = []
-        self.clinic_queue  = ClinicQueue()
-        self.sir_model     = SIRModel(beta=self.BASE_BETA)
-        self.event_log:    list[str]   = []
-        self.paused:       bool        = False
+        self.clinic_queues:  list[ClinicQueue]  = [ClinicQueue() for _ in self._hospital_ids]
+        self._hosp_queue_map: dict[str, ClinicQueue] = {
+            hid: q for hid, q in zip(self._hospital_ids, self.clinic_queues)
+        }
+        self.clinic_queue = self.clinic_queues[0]
+        self.sir_model    = SIRModel(beta=self.BASE_BETA)
+        self.event_log:   list[str] = []
+        self.paused:      bool      = False
 
-        # End condition
-        self._end_condition: EndCondition | None = end_condition
-        self.is_done:      bool        = False
-        self.stop_reason:  str | None  = None
-
-        # Noise parameters
-        self.background_visit_rate: float = background_visit_rate
-
-        # Static mode — bypasses SIR dynamics
-        self._static_mode          = static_mode
-        self._infectious_fraction  = infectious_fraction
-        self._cases_per_day        = cases_per_day
-
-        # FL extension points
-        self.fl_round:     int         = 0
-        self.fl_log:       list[str]   = []
-
-        # FL learner — created lazily on first run_round() call if lora_config set
-        self._lora_config        = lora_config
-        self._sim_days           = sim_days
-        self._fl_learner_kwargs  = dict(
-            min_events_to_train = min_events_to_train,
-            local_epochs        = local_epochs,
-            batch_size          = batch_size,
-            lr                  = lr,
-            dataset             = dataset,
-            train_sample_cap    = train_sample_cap,
-            replay_buffer_size  = replay_buffer_size,
-            device              = training_device,
-        )
-        self._learner            = None   # doctor (disease classifier)
-        self._nurse_learner      = None   # nurse  (severity classifier)
-        self.last_round_events:  list = []
-
-        # Daily log file — appended at end of each simulated day
-        from pathlib import Path
-        log_dir = Path(__file__).resolve().parent.parent / "sim_logs"
+        # Daily log file
+        log_dir  = Path(__file__).resolve().parent.parent / "sim_logs"
         log_dir.mkdir(exist_ok=True)
         log_path = log_dir / f"sim_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         self._log_file = log_path.open("w", encoding="utf-8", buffering=1)
-        self._log_path = log_path
         self._log_file.write(
-            f"# Federated Simulated World — started {datetime.now().isoformat()}\n"
-            f"# agents={num_agents}  seed={seed}\n\n"
+            f"# WorldEngine — started {datetime.now().isoformat()}\n"
+            f"# agents={n_agents}  seed={self._seed}\n\n"
         )
 
-        # Inject an initial disease cloud at the first seed's location
         self.inject_disease_cloud(seed_agents[0].current_location, intensity=0.4)
-
-        # Sync initial SIR
         self.sir_model.step(self.agents)
 
     # ── Public API ───────────────────────────────────────────────────────────
@@ -385,10 +357,7 @@ class WorldEngine:
         3. Stochastically generate new disease clouds
         4. Decay existing clouds
 
-        Becomes a no-op once is_done is True.
         """
-        if self.is_done:
-            return
         t = self.current_tick
 
         for loc in self.locations.values():
@@ -440,7 +409,7 @@ class WorldEngine:
                 prevalence = n_infectious / n_present if n_present > 0 else 0.0
 
             beta           = self.BASE_BETA * self._beta_scale * self.strategy.transmission_rate(agent.current_type)
-            daily_contacts = self.DAILY_CONTACTS.get(agent.current_type, 8)
+            daily_contacts = self.DAILY_CONTACTS.get(agent.current_type, 8) * agent.sociability
             ticks_at_loc   = self._TICKS_AT_LOC.get(agent.current_type, 72)
             # Per-tick contribution normalised so daily total = beta * prevalence
             # * daily_contacts / TICKS_PER_DAY (independent of ticks spent here).
@@ -490,7 +459,115 @@ class WorldEngine:
                 cases.append(ev)
         return cases
 
-    # ── Extension point: Diagnostic / FL hooks ───────────────────────────────
+    # ── Epidemic state ───────────────────────────────────────────────────────
+
+    @property
+    def epidemic_active(self) -> bool:
+        """True while any agent is infected or infectious."""
+        return self.sir_model.I > 0
+
+    # ── Primary data-generation interface ────────────────────────────────────
+
+    def run_sim_days(self, n: int) -> list[DiagnosticEvent]:
+        """
+        Advance the simulation by n days and return all DiagnosticEvents
+        produced during that period.
+
+        This is the only method FLSilo (or any orchestrator) needs to call.
+        It dispatches to _run_static_days when the epidemic config sets
+        static_mode=True; otherwise runs the full SIR tick loop.
+        """
+        if self._config.epidemic.static_mode:
+            return self._run_static_days(n)
+        return self._run_sir_days(n)
+
+    def _run_sir_days(self, n: int) -> list[DiagnosticEvent]:
+        """Run n days of SIR simulation; return events processed by the clinic."""
+        start = len(self.clinic_queue.processed)
+        for _ in range(n * self.TICKS_PER_DAY):
+            self.step_tick()
+        events = self.clinic_queue.processed[start:]
+        del self.clinic_queue.processed[:start]
+        return events
+
+    def _run_static_days(self, n: int) -> list[DiagnosticEvent]:
+        """
+        Static-mode event generation — no SIR, no agents.
+
+        Produces exactly cases_per_day × n DiagnosticEvents per call.
+        infectious_fraction controls the disease/background split.
+        """
+        from simulation.case_table import CaseTable, HealthyCaseTable
+        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS, OTHER_DISEASE_COMPLAINTS
+        BACKGROUND_COMPLAINTS = NON_INFECTIOUS_COMPLAINTS + OTHER_DISEASE_COMPLAINTS
+        epi   = self._config.epidemic
+        total = epi.cases_per_day * n
+        events: list[DiagnosticEvent] = []
+
+        for k in range(total):
+            personality = self._rng.choice(list(Personality))
+            if self._rng.random() < epi.infectious_fraction:
+                ev = self._make_static_infectious_event(k, personality)
+            else:
+                ev = self._make_static_background_event(k, personality, BACKGROUND_COMPLAINTS)
+            opening = self._generate_opening_for_event(ev, personality)
+            ev.conversation.insert(0, {"role": "patient", "text": opening})
+            diag_fn = getattr(self, "_diagnostic_fn", _default_diagnostic)
+            ev = diag_fn(ev)
+            events.append(ev)
+
+        self.current_day += n
+        return events
+
+    def _make_static_infectious_event(self, idx: int, personality: Personality) -> DiagnosticEvent:
+        """Build one synthetic infectious DiagnosticEvent for static mode."""
+        from simulation.case_table import CaseTable
+        epi  = self._config.epidemic
+        prog = self._rng.choices(self.progressions, weights=self._disease_weights)[0]
+        traj = prog.sample_trajectory(self._rng)
+        ct   = CaseTable(traj, self._rng, max_days=30)
+        incubation = int(getattr(traj, "incubation_days", 2))
+        rise       = int(getattr(traj, "rise_days",       3))
+        day  = self._rng.randint(incubation + 1,
+                                 max(incubation + 2, incubation + rise + 3))
+        sev          = ct._severity_at_day(day)
+        disease_name = getattr(traj, "disease_name", "unknown")
+        return DiagnosticEvent(
+            agent_id      = f"static_{idx}",
+            severity      = sev,
+            symptoms      = max(0.0, sev * 0.8 + self._rng.gauss(0, 0.08)),
+            days_infected = day,
+            personality   = personality,
+            case_table    = ct,
+            ground_truth  = f"{disease_name}/{severity_bucket(sev)}",
+            gt_disease    = disease_name,
+            gt_severity   = severity_bucket(sev),
+            is_background = False,
+        )
+
+    def _make_static_background_event(self, idx: int, personality: Personality,
+                                      complaints: list) -> DiagnosticEvent:
+        """Build one synthetic background (non-infectious) DiagnosticEvent."""
+        from simulation.case_table import HealthyCaseTable
+        complaint    = self._rng.choice(complaints)
+        gt_disease   = complaint.disease
+        ground_truth = (gt_disease if gt_disease == "non-infectious"
+                        else f"{gt_disease}/discharge")
+        return DiagnosticEvent(
+            agent_id          = f"bg_{idx}",
+            severity          = 0.0,
+            symptoms          = self._rng.uniform(0.0, 0.10),
+            days_infected     = 0,
+            personality       = personality,
+            case_table        = HealthyCaseTable(self._rng),
+            ground_truth      = ground_truth,
+            gt_disease        = gt_disease,
+            gt_severity       = "discharge",
+            is_background     = True,
+            complaint_context = complaint.prompt_context,
+        )
+
+    # ── Extension point: diagnostic hook ─────────────────────────────────────
 
     def register_diagnostic_fn(self, fn) -> None:
         """
@@ -500,272 +577,19 @@ class WorldEngine:
         """
         self._diagnostic_fn = fn
 
-    # ── FL methods — only active when lora_config is set ─────────────────────
-
-    @property
-    def learner(self):
-        """Diagnostic doctor learner (disease classifier, 4-class)."""
-        if self._learner is None:
-            if self._lora_config is None:
-                raise RuntimeError("WorldEngine: lora_config not set — not FL-enabled")
-            from fl.learner import FLLearner
-            self._learner = FLLearner(
-                lora_config  = self._lora_config,
-                label_space  = "disease",
-                **self._fl_learner_kwargs,
-            )
-        return self._learner
-
-    @property
-    def nurse_learner(self):
-        """Triage nurse learner (severity classifier, 5-class)."""
-        if self._nurse_learner is None:
-            if self._lora_config is None:
-                raise RuntimeError("WorldEngine: lora_config not set — not FL-enabled")
-            from fl.learner import FLLearner
-            self._nurse_learner = FLLearner(
-                lora_config  = self._lora_config,
-                label_space  = "severity",
-                **self._fl_learner_kwargs,
-            )
-        return self._nurse_learner
-
-    def get_nurse_weights(self):
-        return self.nurse_learner.get_weights()
-
-    def set_nurse_weights(self, weights) -> None:
-        self.nurse_learner.set_weights(weights)
-
-    def release_nurse_model(self) -> None:
-        if self._nurse_learner is not None:
-            self._nurse_learner.release()
-
-    def _generate_static_round(self) -> list:
-        """
-        Static-mode event generation — no SIR, no agents.
-
-        Produces exactly `cases_per_day * sim_days` DiagnosticEvents per round.
-        Each event is infectious (drawn from this silo's disease_weights) with
-        probability `infectious_fraction`, and a non-infectious background
-        complaint otherwise.  Advances a round counter so the end condition
-        can still fire on a horizon limit.
-        """
-        from simulation.case_table import CaseTable, HealthyCaseTable
-        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
-        from simulation.models import DiagnosticEvent
-        from simulation.symptom_language import Personality
-
-        self.fl_round += 1
-        events: list = []
-        total = self._cases_per_day * self._sim_days
-
-        for k in range(total):
-            personality = self._rng.choice(list(Personality))
-            if self._rng.random() < self._infectious_fraction:
-                # ── Infectious visit ──────────────────────────────────────────
-                prog = self._rng.choices(self.progressions,
-                                         weights=self._disease_weights)[0]
-                traj = prog.sample_trajectory(self._rng)
-                ct   = CaseTable(traj, self._rng, max_days=30)
-
-                # Pick a plausible symptomatic day (post-incubation, pre-recovery)
-                incubation = int(getattr(traj, "incubation_days", 2))
-                rise       = int(getattr(traj, "rise_days",       3))
-                day = self._rng.randint(incubation + 1,
-                                        max(incubation + 2, incubation + rise + 3))
-
-                sev  = ct._severity_at_day(day)
-                disease_name = getattr(traj, 'disease_name', 'unknown')
-                _sev_bucket = severity_bucket(sev)
-                ev = DiagnosticEvent(
-                    agent_id      = f"static_{k}",
-                    severity      = sev,
-                    symptoms      = max(0.0, sev * 0.8 + self._rng.gauss(0, 0.08)),
-                    days_infected = day,
-                    personality   = personality,
-                    case_table    = ct,
-                    ground_truth  = f"{disease_name}/{_sev_bucket}",
-                    gt_disease    = disease_name,
-                    gt_severity   = _sev_bucket,
-                    is_background = False,
-                )
-            else:
-                # ── Non-infectious visit ──────────────────────────────────────
-                complaint = self._rng.choice(NON_INFECTIOUS_COMPLAINTS)
-                ev = DiagnosticEvent(
-                    agent_id          = f"bg_{k}",
-                    severity          = 0.0,
-                    symptoms          = self._rng.uniform(0.0, 0.10),
-                    days_infected     = 0,
-                    personality       = personality,
-                    case_table        = HealthyCaseTable(self._rng),
-                    ground_truth      = "non-infectious",
-                    gt_disease        = "non-infectious",
-                    gt_severity       = "discharge",
-                    is_background     = True,
-                    complaint_context = complaint.prompt_context,
-                )
-            events.append(ev)
-
-        # In static mode use fl_round as the "day" proxy for HorizonCondition
-        self.current_day = self.fl_round
-        if self._end_condition is not None and self._end_condition.check(self):
-            self.is_done    = True
-            self.stop_reason = self._end_condition.reason
-
-        return events
-
-    def run_round(self, round_num: int = 0) -> dict:
-        """
-        One complete FL round: advance sim_days → evaluate → train → return metrics.
-        Called by the FL orchestrator (fl/train.py) each round.
-
-        Evaluation order (prequential):
-          1. New events arrive from simulation.
-          2. Current model is evaluated on them BEFORE training (unseen data).
-          3. Events are added to the on-disk dataset and the model is fine-tuned
-             on a stratified sample from the accumulated training split.
-          4. Holdout metrics are logged if a SiloDataset is attached.
-        """
-        if self.is_done:
-            if self.learner._frozen_weights is None:
-                self.learner.snapshot_for_freeze(self.last_round_events)
-            return self.learner.frozen_metrics(self.sir_model)
-
-        if self._static_mode:
-            events = self._generate_static_round()
-            # Add opening patient statement to each event before the LLM sees it.
-            # Without this, ev.conversation is empty → LLM skips Q&A →
-            # _build_dataset finds no patient turns → event dropped from training.
-            for ev in events:
-                opening = self._generate_static_opening(ev)
-                ev.conversation.insert(0, {"role": "patient", "text": opening})
-            diag_fn = getattr(self, "_diagnostic_fn", None)
-            if diag_fn is not None:
-                events = [diag_fn(ev) for ev in events]
-            self.clinic_queue.processed.extend(events)
-        else:
-            start = len(self.clinic_queue.processed)
-            for _ in range(self._sim_days * self.TICKS_PER_DAY):
-                self.step_tick()
-                if self.is_done:
-                    break
-            events = self.clinic_queue.processed[start:]
-            # Trim processed archive; dataset is maintained on disk by FLLearner.
-            del self.clinic_queue.processed[:start]
-
-        self.last_round_events = events
-        num_events = len(events)
-        sir = self.sir_model
-
-        # Step 1: prequential eval — models haven't seen these events yet
-        metrics        = self.learner.evaluate(events)        # doctor: disease acc
-        local_metrics  = self.learner.evaluate_local(events)
-        nurse_metrics  = self.nurse_learner.evaluate(events)  # nurse: severity acc
-        local_triage   = nurse_metrics.get("triage_acc", float("nan"))
-        local_diag     = local_metrics.get("diag_acc",   float("nan"))
-
-        # Step 2: add to dataset and fine-tune on stratified sample (both models)
-        if num_events >= self.learner.min_events_to_train:
-            n, epoch_losses = self.learner.train(events, round_num=round_num)
-            self.learner.train_local(events, round_num=round_num)
-            self.nurse_learner.train(events, round_num=round_num)
-            self.nurse_learner.train_local(events, round_num=round_num)
-            trained = 1
-        else:
-            n, epoch_losses = 0, []
-            trained = 0
-
-        # Step 3: holdout eval (stable test set, never trained on)
-        holdout_m      = self.learner.evaluate_holdout()
-        nurse_holdout  = self.nurse_learner.evaluate_holdout()
-        holdout_triage = nurse_holdout.get("triage_acc", float("nan"))
-        holdout_diag   = holdout_m.get("diag_acc",   float("nan"))
-        if self.learner.dataset is not None:
-            _ht, _hh = self.learner.dataset.size()
-        else:
-            _ht = _hh = 0
-
-        nan = float("nan")
-        # triage_acc = nurse fed model; diag_acc = doctor fed model
-        fed_triage   = nurse_metrics.get("triage_acc", nan)
-        fed_diag     = metrics.get("diag_acc",         nan)
-        local_triage_fed = self.nurse_learner.evaluate_local(events).get("triage_acc", nan)
-        fl_gain      = fed_triage - local_triage_fed if (fed_triage == fed_triage and local_triage_fed == local_triage_fed) else nan
-        fl_diag_gain = fed_diag - local_diag         if (fed_diag   == fed_diag   and local_diag       == local_diag)       else nan
-
-        # Merge nurse metrics into output under the primary triage_acc key
-        metrics["triage_acc"] = fed_triage
-
-        metrics.update(
-            trained_on        = n,
-            trained           = trained,
-            num_events        = num_events,
-            epoch_losses      = epoch_losses,
-            sir_s             = sir.S,
-            sir_i             = sir.I,
-            sir_r             = sir.R,
-            local_triage_acc  = local_triage,
-            local_diag_acc    = local_diag,
-            fl_gain           = fl_gain,
-            fl_diag_gain      = fl_diag_gain,
-            holdout_triage_acc = holdout_triage,
-            holdout_diag_acc   = holdout_diag,
-            dataset_train_n    = _ht,
-            dataset_holdout_n  = _hh,
-        )
-        return metrics
-
-    def get_weights(self):
-        return self.learner.get_weights()
-
-    def set_weights(self, weights) -> None:
-        self.learner.set_weights(weights)
-
-    def release_model(self) -> None:
-        self.learner.release()
-        self.release_nurse_model()
-
-    def try_accept_global(self, global_weights) -> bool:
-        return self.learner.try_accept_global(global_weights)
-
-    def evaluate(self, events=None) -> dict:
-        events = events if events is not None else self.clinic_queue.processed
-        return self.learner.evaluate(events)
+    def attach_interaction_logger(self, logger) -> None:
+        """Register an InteractionLogger for JSONL audit logging."""
+        self._interaction_logger = logger
 
     def set_disease_strategy(self, strategy: DiseaseStrategy) -> None:
         """Hot-swap the transmission strategy at runtime."""
         self.strategy = strategy
-        self.event_log.append(
-            f"Day {self.current_day}: Transmission → {strategy.name}"
-        )
+        self.event_log.append(f"Day {self.current_day}: Transmission → {strategy.name}")
 
-    def set_progression_strategy(
-        self, strategy: DiseaseProgressionStrategy
-    ) -> None:
-        """
-        Hot-swap the progression strategy at runtime.
-        Already-infected agents keep their current trajectory;
-        new infections will use the new strategy.
-        """
+    def set_progression_strategy(self, strategy: DiseaseProgressionStrategy) -> None:
+        """Hot-swap progression; already-infected agents keep their current trajectory."""
         self.progression = strategy
-        self.event_log.append(
-            f"Day {self.current_day}: Progression → {strategy.name}"
-        )
-
-    def set_patient_llm(self, client) -> None:
-        """
-        Wire a PatientLLMClient for LLM-generated opening statements.
-        If not set, opening statements fall back to SymptomNarrator templates.
-        """
-        self._patient_llm = client
-
-    def attach_interaction_logger(self, logger) -> None:
-        """
-        Register an InteractionLogger.  Every processed DiagnosticEvent will
-        be serialised to the logger's JSONL file automatically.
-        """
-        self._interaction_logger = logger
+        self.event_log.append(f"Day {self.current_day}: Progression → {strategy.name}")
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
@@ -780,7 +604,8 @@ class WorldEngine:
         # Stochastic S→I transitions for accumulated daily exposure (eq. 3)
         newly_infected = []
         for agent in self.agents:
-            if agent.apply_daily_infection(self.progressions, self._disease_weights):
+            dw = self._agent_disease_weights.get(agent.id, self._disease_weights)
+            if agent.apply_daily_infection(self.progressions, dw):
                 newly_infected.append(agent.name)
             agent.reset_daily_exposure()
 
@@ -816,15 +641,6 @@ class WorldEngine:
         # SIR observer — do this BEFORE clinic so UI shows updated counts
         self.sir_model.step(self.agents)
 
-        # End condition check (after SIR update so counts are current)
-        if self._end_condition and not self.is_done:
-            if self._end_condition.check(self):
-                self.is_done    = True
-                self.stop_reason = self._end_condition.reason
-                self.event_log.append(
-                    f"Day {self.current_day}: Simulation ended — {self.stop_reason}"
-                )
-
         # Collect symptomatic + incubating cases into queue
         cases = self.collect_end_of_day_cases()
         for c in cases:
@@ -834,7 +650,10 @@ class WorldEngine:
                     'role':  'patient',
                     'text':  self._generate_opening(ag, event=c),
                 })
-            self.clinic_queue.enqueue(c)
+            q = self._hosp_queue_map.get(
+                ag.home_hospital_id if ag else "", self.clinic_queue
+            )
+            q.enqueue(c)
 
         # Collect non-infectious background visitors
         for c in self._collect_background_cases():
@@ -844,14 +663,15 @@ class WorldEngine:
                     'role':  'patient',
                     'text':  self._generate_opening(ag, event=c),
                 })
-            self.clinic_queue.enqueue(c)
+            q = self._hosp_queue_map.get(
+                ag.home_hospital_id if ag else "", self.clinic_queue
+            )
+            q.enqueue(c)
 
         # Log file daily header (clinic details written after processing)
         sir = self.sir_model
         self._log_file.write(
-            f"=== Day {self.current_day:04d} | "
-            f"S={sir.S:3d} I={sir.I:3d} R={sir.R:3d} | "
-            f"FL round={self.fl_round}\n"
+            f"=== Day {self.current_day:04d} | S={sir.S:3d} I={sir.I:3d} R={sir.R:3d}\n"
         )
         day_entries = [e for e in self.event_log if f"Day {self.current_day}:" in e]
         for entry in day_entries:
@@ -861,31 +681,25 @@ class WorldEngine:
         if len(self.event_log) > 200:
             self.event_log = self.event_log[-200:]
 
-    def _generate_static_opening(self, event: DiagnosticEvent) -> str:
-        """
-        Generate an opening statement for a synthetic (static-mode) event.
-        Uses PatientLLMClient when wired, falls back to SymptomNarrator templates.
-        """
-        from simulation.symptom_language import SymptomNarrator, background_opening
-        patient_llm = getattr(self, "_patient_llm", None)
-        personality = event.personality
-
+    def _generate_opening_for_event(self, event: DiagnosticEvent,
+                                    personality: Personality) -> str:
+        """Opening statement for a static-mode event (no live agent)."""
+        from simulation.symptom_language import background_opening
         if event.is_background:
-            if patient_llm is not None and event.complaint_context:
-                try:
-                    return patient_llm.complaint_opening(event.complaint_context, personality)
-                except Exception:
-                    pass
             return background_opening(personality, self._rng)
-        else:
-            if patient_llm is not None:
-                try:
-                    return patient_llm.opening_statement(
-                        event.severity, event.days_infected, personality)
-                except Exception:
-                    pass
-            return SymptomNarrator().opening_statement(
-                event.severity, event.days_infected, personality)
+        from simulation.models import InnerState
+        inner = InnerState(
+            severity      = event.severity,
+            symptoms      = event.symptoms,
+            days_infected = event.days_infected,
+            trend         = "stable",
+            fatigue       = 5.0,
+            pain          = 4.0,
+            mood          = 0.5,
+            top_vital     = None,
+            disease_name  = event.gt_disease or "influenza",
+        )
+        return self._config.agents.data_source.opening_statement(inner, event.days_infected, personality)
 
     def _collect_background_cases(self) -> list[DiagnosticEvent]:
         """
@@ -894,7 +708,8 @@ class WorldEngine:
         hypertension follow-up, or fatigue) rather than an active infection.
         Rate is configurable via background_visit_rate (default 2.5 %/agent/day).
         """
-        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS
+        from simulation.complaints import NON_INFECTIOUS_COMPLAINTS, OTHER_DISEASE_COMPLAINTS
+        BACKGROUND_COMPLAINTS = NON_INFECTIOUS_COMPLAINTS + OTHER_DISEASE_COMPLAINTS
         from simulation.case_table import HealthyCaseTable
         cases = []
         for agent in self.agents:
@@ -903,7 +718,10 @@ class WorldEngine:
             if agent.hospitalised or agent._care_cooldown > 0:
                 continue
             if self._rng.random() < self.background_visit_rate:
-                complaint = self._rng.choice(NON_INFECTIOUS_COMPLAINTS)
+                complaint = self._rng.choice(BACKGROUND_COMPLAINTS)
+                gt_disease = complaint.disease
+                ground_truth = (gt_disease if gt_disease == "non-infectious"
+                                else f"{gt_disease}/discharge")
                 ev = DiagnosticEvent(
                     agent_id          = agent.id,
                     severity          = 0.0,
@@ -911,8 +729,8 @@ class WorldEngine:
                     days_infected     = 0,
                     personality       = agent.personality,
                     case_table        = HealthyCaseTable(self._rng),
-                    ground_truth      = "non-infectious",
-                    gt_disease        = "non-infectious",
+                    ground_truth      = ground_truth,
+                    gt_disease        = gt_disease,
                     gt_severity       = "discharge",
                     is_background     = True,
                     complaint_context = complaint.prompt_context,
@@ -921,67 +739,42 @@ class WorldEngine:
         return cases
 
     def _generate_opening(self, agent, event: DiagnosticEvent | None = None) -> str:
-        """
-        Opening patient complaint for the clinic queue.
-        Uses PatientLLMClient if wired; falls back to SymptomNarrator templates.
-
-        Non-infectious visitors (event.complaint_context set) use the complaint
-        context to prompt the patient LLM for a naturalistically typed opening.
-        Infectious visitors use severity + days_infected as before.
-        """
+        """Opening patient complaint for the SIR clinic queue."""
         from simulation.symptom_language import background_opening
-        patient_llm = getattr(self, "_patient_llm", None)
-
-        # Non-infectious background visit — use complaint-specific LLM prompt
         if event is not None and event.complaint_context:
-            if patient_llm is not None:
-                try:
-                    return patient_llm.complaint_opening(
-                        event.complaint_context, agent.personality
-                    )
-                except Exception:
-                    pass
             return background_opening(agent.personality, self._rng)
-
-        # Infectious visit
-        if patient_llm is not None:
-            try:
-                return patient_llm.opening_statement(
-                    agent.health_state.severity,
-                    agent.health_state.days_infected,
-                    agent.personality,
-                )
-            except Exception:
-                pass
-        return agent.opening_statement()
+        return self._config.agents.data_source.opening_statement(
+            agent.inner_state, agent.health_state.days_infected, agent.personality
+        )
 
     def _process_clinic_queue(self) -> None:
         """
-        Process the clinic queue (slow LLM calls).
+        Process all hospital clinic queues (slow LLM calls).
         Called separately from _end_of_day so UI can update in between.
+        Single-hospital worlds have one queue; shared-world has N.
         """
-        if not self.clinic_queue.patients:
-            return
-
         diag_fn = getattr(self, "_diagnostic_fn", _default_diagnostic)
-        results = self.clinic_queue.process_all(diag_fn)
-        msgs    = self.clinic_queue.apply_outcomes(
-            results, self.agents_by_id, self._hospital_id
-        )
-        self.event_log.extend(msgs)
+        logger  = getattr(self, "_interaction_logger", None)
+        all_results: list = []
 
-        logger = getattr(self, "_interaction_logger", None)
-        if logger is not None:
-            for ev in results:
-                logger.log(ev, day=self.current_day, seed=self._seed)
+        for hid, q in self._hosp_queue_map.items():
+            if not q.patients:
+                continue
+            results = q.process_all(diag_fn)
+            msgs    = q.apply_outcomes(results, self.agents_by_id, hid)
+            self.event_log.extend(msgs)
+            all_results.extend(results)
+
+            if logger is not None:
+                for ev in results:
+                    logger.log(ev, day=self.current_day, seed=self._seed)
 
         # Write clinic details to log file
-        clinic_today = [ev for ev in results if ev.oracle_label is not None]
+        clinic_today = [ev for ev in all_results if ev.oracle_label is not None]
         for ev in clinic_today[-20:]:
             ag = self.agents_by_id.get(ev.agent_id)
             name = ag.name if ag else ev.agent_id
             ptrait = ev.personality.value if ev.personality else "?"
-            # Tag incubating (infected, severity==0) and background (healthy) visits
             if ev.is_background:
                 tag = "[bg]   "
             elif ev.severity == 0.0 and ev.days_infected > 0:
