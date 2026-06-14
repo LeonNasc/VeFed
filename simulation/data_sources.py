@@ -56,7 +56,6 @@ class TemplateDataSource(DataSource):
 
     def opening_statement(self, inner_state: "InnerState", days: int,
                           personality: "Personality") -> str:
-        from simulation.symptom_language import SymptomNarrator
         state = inner_state
         if self._confusion_rate > 0 and self._rng.random() < self._confusion_rate:
             candidates = [d for d in self._INFECTIOUS

@@ -797,22 +797,36 @@ def run_shared_world_training(cfg: SharedWorldConfig,
     _dataset_dir = Path(cfg.dataset_dir) / f"shared_{_run_id}"
 
     # ── Build the single shared world ────────────────────────────────────────
-    progs    = [PROGRESSION_STRATEGIES[p] for p in cfg.progressions]
-    strategy = STRATEGIES.get("Influenza")
+    from simulation.world_config import (
+        WorldConfig as SimWorldConfig, AgentConfig, EpidemicConfig,
+    )
+    from simulation.data_sources import TemplateDataSource
+
     end_cond = end_condition_from_config(cfg.end_condition, cfg.end_condition_param)
 
+    _shared_wc = SimWorldConfig(
+        agents=AgentConfig(
+            num_agents=cfg.n_agents,
+            data_source=TemplateDataSource(
+                seed=cfg.seed,
+                confusion_rate=getattr(cfg, "confusion_rate", 0.0),
+            ),
+        ),
+        epidemic=EpidemicConfig(
+            progressions=cfg.progressions,
+            disease_strategy=getattr(cfg, "disease_strategy",
+                                     cfg.progressions[0] if cfg.progressions else "Influenza"),
+            beta_scale=cfg.beta_scale,
+            initial_seeds=cfg.initial_seeds,
+            contact_rate_sigma=cfg.contact_rate_sigma,
+        ),
+    )
     world = WorldEngine(
-        num_agents             = cfg.n_agents,
-        seed                   = cfg.seed,
-        progression_strategies = progs,
-        disease_strategy       = strategy,
-        end_condition          = end_cond,
-        beta_scale             = cfg.beta_scale,
-        initial_seeds          = cfg.initial_seeds,
-        contact_rate_sigma     = cfg.contact_rate_sigma,
-        n_hospitals            = cfg.n_hospitals,
-        hospital_disease_weights = cfg.hospital_disease_weights,
-        # No lora_config — learners live outside WorldEngine in this mode
+        _shared_wc,
+        seed=cfg.seed,
+        n_hospitals=cfg.n_hospitals,
+        hospital_disease_weights=cfg.hospital_disease_weights,
+        end_condition=end_cond,
     )
 
     # ── Wire Ollama (optional) ────────────────────────────────────────────────
