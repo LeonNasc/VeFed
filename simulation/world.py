@@ -236,8 +236,13 @@ class WorldEngine:
         # how agents are spatially assigned, not how FL trains on them.
         n_hospitals: int = 1,
         hospital_disease_weights: list[list[float]] | None = None,
+        # Optional end condition — used only by non-FL modes (static, centralized)
+        # that run step_tick() directly and need a termination signal.
+        # FLSilo owns EndCondition for the FL case.
+        end_condition=None,
     ):
-        self._config = config
+        self._config        = config
+        self._end_condition = end_condition
         epi   = config.epidemic
         agents_cfg = config.agents
 
@@ -465,6 +470,31 @@ class WorldEngine:
     def epidemic_active(self) -> bool:
         """True while any agent is infected or infectious."""
         return self.sir_model.I > 0
+
+    @property
+    def is_done(self) -> bool:
+        """Termination check for non-FL step_tick loops (static / centralized)."""
+        if self._end_condition is not None:
+            return self._end_condition.check(self)
+        return not self.epidemic_active
+
+    @property
+    def stop_reason(self) -> str | None:
+        if not self.is_done:
+            return None
+        if self._end_condition is not None:
+            return getattr(self._end_condition, "reason", "condition_met")
+        return "epidemic_extinct"
+
+    def set_patient_llm(self, client) -> None:
+        """Compatibility shim: inject OllamaDataSource after world construction."""
+        import dataclasses
+        from simulation.data_sources import OllamaDataSource
+        new_agents = dataclasses.replace(
+            self._config.agents,
+            data_source=OllamaDataSource(client=client),
+        )
+        self._config = dataclasses.replace(self._config, agents=new_agents)
 
     # ── Primary data-generation interface ────────────────────────────────────
 

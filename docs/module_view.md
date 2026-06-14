@@ -1,6 +1,6 @@
 # Module View — Federated Simulated World
 
-**Last updated: 2026-05-30**
+**Last updated: 2026-06-14**
 
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
@@ -17,52 +17,55 @@ Four views are provided:
 ```mermaid
 graph TD
     subgraph simulation["simulation/"]
-        WE["world.py\nWorldEngine · ClinicQueue\nDiseaseCloud · Location"]
+        WC["world_config.py\nWorldConfig · AgentConfig · EpidemicConfig\npure data — no simulation logic"]
+        DS["data_sources.py\nDataSource ABC\nTemplateDataSource · PhraseLibraryDataSource\nOllamaDataSource\nconfusion_rate lives here"]
+        WE["world.py\nWorldEngine · ClinicQueue\nrun_sim_days() · step_tick()\nno FL methods"]
         MOD["models.py\nAgent · HealthState · InnerState\nDiagnosticEvent · SIRModel"]
-        PROG["progression.py\nDiseaseProgressionStrategy\nDiseaseTrajectory\n3 active strategies (Flu/Corona/SlowBurn)"]
+        PROG["progression.py\nDiseaseProgressionStrategy\nDiseaseTrajectory\nInfluenza · BacterialPneumonia · SlowBurn"]
         STRAT["strategies.py\nDiseaseStrategy\n3 concrete strategies"]
-        COMP["complaints.py\nNonInfectiousComplaint\nNON_INFECTIOUS_COMPLAINTS\n5 types (M54.5 R51 F41.1 Z87.39 R53.83)"]
-        SYMP["symptom_language.py\nSymptomNarrator · Personality\nTREND_ADDONS · VITAL_ADDONS"]
-        CT["case_table.py\nCaseTable · MimicCaseTable\nNORMAL_RANGES · SEVERITY_SLOPES\nmanagement_from_vitals (NEWS2)"]
+        COMP["complaints.py\nNonInfectiousComplaint\nNON_INFECTIOUS_COMPLAINTS"]
+        SYMP["symptom_language.py\nSymptomNarrator · Personality"]
+        CT["case_table.py\nCaseTable · MimicCaseTable"]
         EC["end_conditions.py\nEndCondition ABC\nHorizon · Extinction\nNoSusceptibles · Budget"]
-        MIMI["mimic_db.py\nMimicDatabase ABC\nMockMimicDatabase\nMimicRecord · MimicDiseaseTrajectory"]
-        OLL["ollama_client.py\nOllamaDiagnosticClient\n+ DiagnosticExampleStore\n(federated few-shot bank)"]
-        PLM["patient_llm.py\nPatientLLMClient\nopening_statement()\ncomplaint_opening()"]
+        OLL["ollama_client.py\nOllamaDiagnosticClient\n+ DiagnosticExampleStore\n(federated few-shot bank)\n+ StereotypeLibrary bridge"]
+        PLM["patient_llm.py\nPatientLLMClient\nopening_statement()"]
+        PLIB["phrase_sampler.py\nPhraseLibrary · PHRASES\n675 phrases · 36 buckets"]
+        REP["report.py\nRunReport — HTML + embedded PNG"]
         ILOG["interaction_log.py\nInteractionLogger (.jsonl)"]
-        REP["report.py\nRunReport\nHTML + embedded PNG"]
+        MIMI["mimic_db.py\nMimicDatabase ABC · MockMimicDatabase"]
     end
 
     subgraph fl["fl/"]
-        BASE["base_client.py\nWorldFLClient\nreplay buffer\nrelease_model() VRAM scheduling"]
-        LORA["lora.py\nLoRAConfig · build_model\nget/set_lora_weights"]
-        TRAIN["train.py\nFLTrainConfig · WorldConfig\nrun_federated_training\nrun_centralized_training\nrun_comparison\n_fedavg\nDirichlet disease sampling"]
+        SILO["silo.py\nFLSilo\nrun_round() · get/set_weights()\nrelease_model() · is_done\nlast_round_events"]
+        LEARN["learner.py\nFLLearner\ntrain() · evaluate() · evaluate_holdout()\nlocal shadow model\nreplay buffer + SiloDataset path"]
+        LORA["lora.py\nLoRAConfig · build_model\nget/set_lora_weights · weights_to_npz"]
+        TRAIN["train.py\nFLTrainConfig · WorldConfig (flat)\n_build_sim_world_config()\n_build_fl_silo() · _build_bare_world()\nrun_federated_training\nrun_local_only_training\nrun_centralized_training\nrun_static_training\n_fedavg"]
+        DS2["dataset.py\nSiloDataset\nappend · load_train · load_holdout\nsample_train · size"]
         CEN["centralized.py\nCentralizedTrainer\npooled-data oracle baseline"]
-        SERVER["server.py\nWandBFedAvg\nrun_flower_server"]
+        SERVER["server.py\nWandBFedAvg · run_flower_server"]
         FLWR["flwr_client.py\nmake_flower_client"]
-        FEDN["fedn_client.py\nmake_fedn_callbacks"]
+        PROTO["prototype_library.py\nPrototypeLibrary\nadd_from_events · federate_libraries"]
+        STEREO["stereotype_library.py\nStereotypeLibrary\ncentroid averaging · aggregate_stereotypes"]
     end
 
     subgraph viz["viz/"]
-        ET["embedding_tracker.py\nEmbeddingTracker\nsnapshot() · save_plots()\nevolution + fl_gain + comparison plots\ncentroid annotations · marker shapes"]
-        MP["metrics_plot.py\nMetricsPlotter\n6-panel figure\nloss · acc · fl_gain · danger · SIR\nbase64 HTML embed + standalone PNG"]
-        DVIZ["disease_viz.py\ngenerate_disease_atlas\nsave_embedding_plot"]
+        ET["embedding_tracker.py\nEmbeddingTracker\nsnapshot() · save_plots()\nevolution + fl_gain + comparison plots"]
+        MP["metrics_plot.py\nMetricsPlotter — 6-panel figure"]
     end
 
-    subgraph ui["ui/"]
-        TUI["tui.py · TUI"]
-        RTUI["rogue_tui.py · RogueTUI"]
-        PYG["pygame_ui.py · PygameUI"]
-    end
-
-    RUN["run.py\nlauncher · presets · RunConfig\n--mode fl / centralized / compare"]
+    RUN["run.py\nlauncher · presets · RunConfig\n_build_sim_world_config bridge"]
 
     %% simulation internal deps
+    WE --> WC
+    WE --> DS
     WE --> MOD
     WE --> PROG
     WE --> STRAT
     WE --> EC
     WE --> COMP
-    WE --> PLM
+    DS --> PLM
+    DS --> SYMP
+    DS --> PLIB
     MOD --> SYMP
     MOD --> CT
     PROG --> MIMI
@@ -70,41 +73,37 @@ graph TD
     REP --> MP
 
     %% fl deps
-    BASE --> WE
-    BASE --> LORA
-    TRAIN --> BASE
+    SILO --> WE
+    SILO --> LEARN
+    SILO --> EC
+    LEARN --> LORA
+    LEARN --> DS2
+    TRAIN --> SILO
     TRAIN --> WE
     TRAIN --> PROG
     TRAIN --> EC
     TRAIN --> CEN
-    CEN --> BASE
+    CEN --> LEARN
     CEN --> LORA
     SERVER --> LORA
-    FLWR --> BASE
-    FEDN --> BASE
-    FEDN --> LORA
-
-    %% viz deps
-    ET --> LORA
-    ET --> WE
-    DVIZ --> PROG
-    DVIZ --> WE
+    FLWR --> SILO
     TRAIN --> ET
     TRAIN --> MP
     TRAIN --> REP
+    TRAIN --> PROTO
+    TRAIN --> STEREO
+    PROTO --> LORA
+    STEREO --> OLL
 
-    %% ui deps
-    TUI --> WE
-    RTUI --> WE
-    PYG --> WE
+    %% viz deps
+    ET --> LORA
 
     %% run.py deps
-    RUN --> WE
+    RUN --> WC
+    RUN --> TRAIN
     RUN --> OLL
     RUN --> PLM
     RUN --> ILOG
-    RUN --> TUI
-    RUN --> TRAIN
 
     %% fl also uses ollama
     TRAIN --> OLL
@@ -119,7 +118,6 @@ graph TD
     style simulation fill:#dbeafe,stroke:#3b82f6
     style fl fill:#dcfce7,stroke:#22c55e
     style viz fill:#fef9c3,stroke:#eab308
-    style ui fill:#fce7f3,stroke:#ec4899
     style OLLAMA fill:#f3f4f6,stroke:#9ca3af
     style FLOWER fill:#f3f4f6,stroke:#9ca3af
     style WANDB fill:#f3f4f6,stroke:#9ca3af
@@ -131,82 +129,80 @@ graph TD
 
 ```mermaid
 flowchart LR
+    subgraph CONFIG["Configuration"]
+        direction TB
+        WC2["WorldConfig\n(AgentConfig + EpidemicConfig)\none per silo"]
+        DS3["DataSource\nTemplate · Phrase · Ollama · MIMIC\ninjected into AgentConfig\nconfusion_rate lives here"]
+        WC2 --> DS3
+    end
+
     subgraph SIM["Simulation Layer"]
         direction TB
-        WORLD["WorldEngine\n(1 per silo)\ndisease_weights: Dirichlet(α)"]
+        WORLD["WorldEngine\n(1 per silo)\nrun_sim_days(n) → events"]
         AGENTS["N Agents\n(SIR dynamics)"]
-        PROG2["Disease Progression\n3 archetypes (active registry)\nStandard Flu · Mild Corona\nSlow Burn"]
-        EC2["End Condition\nExtinction (default)\nor Horizon / Budget"]
+        PROG2["Disease Progression\nInfluenza · Pneumonia · SlowBurn"]
+        EC2["EndCondition\nowned by FLSilo\nHorizon / Extinction / Budget"]
         WORLD --> AGENTS
         WORLD --> PROG2
-        WORLD --> EC2
     end
 
     subgraph VISIT["Visit Generation"]
         direction TB
-        INFECT["Infectious visit\nsymptomatic / incubating agent\nPatientLLM.opening_statement()"]
-        BG["Non-infectious visit\nNonInfectiousComplaint sampled\nPatientLLM.complaint_opening(prompt_context)"]
+        INFECT["Infectious visit\nDataSource.opening_statement(inner_state, days, personality)\n→ Template / Phrase / Ollama / MIMIC"]
+        BG["Non-infectious visit\nNonInfectiousComplaint\nPatientLLM.complaint_opening(prompt_context)"]
     end
 
     subgraph DIAG["Diagnosis Layer"]
         direction TB
         CQ["ClinicQueue"]
-        LLM["LLM Doctor\nphi3:mini / Ollama\n3-step: question → vitals → decision"]
-        DE["DiagnosticEvent\nground_truth: ICD / management\nis_background flag\ncomplaint_context\nconversation · oracle_label"]
-        ILOG2["InteractionLogger\n(.jsonl)"]
-        CQ --> LLM --> DE --> ILOG2
+        LLM["LLM Doctor\nOllamaDiagnosticClient\n3-step: question → vitals → decision\n+ few-shot bank + prototype retrieval"]
+        DE["DiagnosticEvent\nground_truth: ICD label\ngt_disease · gt_severity\nopening · conversation"]
+        CQ --> LLM --> DE
     end
 
-    subgraph FL["Federated Learning"]
+    subgraph FLS["FLSilo"]
         direction TB
-        CLIENT["WorldFLClient\n(per silo)"]
-        BUF["Replay Buffer\naccumulates events\nacross ALL rounds"]
-        FINETUNE["LoRA fine-tune\nDistilBERT 24-class\n(local_epochs=10)"]
-        REL["release_model()\nfree VRAM immediately\npeak = 1 model at a time"]
-        WEIGHTS["LoRA adapter weights\n(q_lin, v_lin only)"]
-        CLIENT --> BUF --> FINETUNE --> REL --> WEIGHTS
-    end
-
-    subgraph CEN["Centralized Oracle"]
-        direction TB
-        POOL["Shared pool buffer\nall events from ALL silos"]
-        CTRAIN["One model trained\non pooled data\n(oracle upper bound)"]
-        POOL --> CTRAIN
+        SILO2["FLSilo.run_round()\n1. run_sim_days(sim_days)\n2. prequential eval\n3. train (doctor + nurse)\n4. holdout eval\n5. check EndCondition"]
+        DOC["FLLearner (doctor)\ndisease classifier\nLoRA DistilBERT"]
+        NURSE["FLLearner (nurse)\nseverity classifier\nLoRA DistilBERT"]
+        SILO2 --> DOC
+        SILO2 --> NURSE
     end
 
     subgraph AGG["Aggregation"]
         direction TB
         FEDAVG["FedAvg\nweighted mean of\nadapter weights"]
-        GLOBAL["Global model\nupdated each round"]
+        GLOBAL["Global model\n(doctor + nurse)\nupdated each round"]
         FEDAVG --> GLOBAL
     end
 
     subgraph OUT["Outputs"]
         direction TB
-        WB["W&B\naggregated/* · silo_N/*\ncentralized/*"]
-        REP2["HTML Report\n+ embedded 6-panel PNG\nmetrics_plot.py"]
-        EMB["Embedding plots\nUMAP evolution\nfl_gain_final\ncomparison_fed_vs_centralized"]
+        WB["W&B\naggregated/* · silo_N/*"]
+        DS4["SiloDataset (on-disk)\ntrain.jsonl · holdout.jsonl\npersists across rounds"]
+        EMB["Embedding plots\nUMAP evolution · fl_gain"]
+        REP2["HTML Report"]
     end
 
-    WORLD -->|"step_tick() × sim_days"| VISIT
+    WC2 --> WORLD
+    WORLD --> VISIT
     VISIT --> CQ
-    DE -->|"events"| CLIENT
-    DE -->|"events"| POOL
-    WEIGHTS -->|"N silos"| FEDAVG
-    GLOBAL -->|"set_weights()"| CLIENT
-    CLIENT -->|"metrics"| WB
-    CTRAIN -->|"metrics"| WB
-    FEDAVG -->|"aggregated metrics"| WB
-    CLIENT -->|"per-round data"| REP2
-    FEDAVG -->|"update_examples()\nfew-shot bank"| LLM
-    CLIENT -->|"weights each round"| EMB
-    CTRAIN -->|"weights each round"| EMB
+    DE --> SILO2
+    DOC --> FEDAVG
+    NURSE --> FEDAVG
+    GLOBAL -->|"set_weights()"| DOC
+    GLOBAL -->|"set_nurse_weights()"| NURSE
+    SILO2 -->|"metrics"| WB
+    DE -->|"append"| DS4
+    FEDAVG -->|"update_examples()"| LLM
+    DOC -->|"weights each round"| EMB
+    SILO2 -->|"per-round data"| REP2
 
+    style CONFIG fill:#f0fdf4,stroke:#16a34a
     style SIM fill:#dbeafe,stroke:#3b82f6
     style VISIT fill:#e0f2fe,stroke:#0284c7
     style DIAG fill:#fce7f3,stroke:#ec4899
-    style FL fill:#dcfce7,stroke:#22c55e
-    style CEN fill:#fff7ed,stroke:#f97316
+    style FLS fill:#dcfce7,stroke:#22c55e
     style AGG fill:#fef9c3,stroke:#eab308
     style OUT fill:#f3e8ff,stroke:#a855f7
 ```
@@ -215,16 +211,16 @@ flowchart LR
 
 ## View C — FL Round Sequence (federated mode)
 
-Round count is **simulation-guided** — runs until all silos hit their end condition
-(`ExtinctionCondition`: I=0 for 3 consecutive days) or `max_rounds` is reached.
-Silos that finish early enter **frozen mode** and conditionally accept the global model.
-Peak VRAM = 1 silo model at a time (models released immediately after weight extraction).
+Round count is **simulation-guided** — runs until all silos hit their EndCondition
+or `max_rounds` is reached.  `FLSilo` owns the EndCondition; `WorldEngine` only knows
+whether the epidemic is active.  Done silos conditionally accept the global model via
+`try_accept_global()`.  Peak VRAM = 1 silo model at a time (released after weight extraction).
 
 ```mermaid
 sequenceDiagram
     participant Loop as run_federated_training()
-    participant SA as Active Silo (WorldFLClient)
-    participant SD as Done Silo (WorldFLClient)
+    participant SA as FLSilo (active)
+    participant SD as FLSilo (done)
     participant TR as EmbeddingTracker
     participant OLL as OllamaDiagnosticClient
     participant WB as Weights & Biases
@@ -232,36 +228,36 @@ sequenceDiagram
     Note over Loop: Round r = 1..max_rounds
 
     Loop->>SA: set_weights(global_weights)
-    Note over SA: builds model on GPU (lazy)
-    Loop->>SD: try_accept_global(global_weights, threshold=0.10)
-    Note over SD: eval on frozen batch; accept if drop ≤ 10%
+    Loop->>SA: set_nurse_weights(global_nurse_weights)
+    Loop->>SD: try_accept_global(global_weights)
+    Note over SD: eval on frozen holdout; accept on strict improvement
+    Loop->>SD: set_nurse_weights(global_nurse_weights)
 
     par active silo
-        SA->>SA: run_simulation_round() — sim_days × 288 ticks
-        SA->>SA: _collect_background_cases() — NonInfectiousComplaint visits
-        SA->>SA: evaluate() — pre-train metrics
-        SA->>SA: train_on_events() — extend replay buffer → train on buffer
-        SA->>SA: train_local_on_events() — same for shadow model
-    and done silo (frozen)
-        SD->>SD: _run_frozen_round() — no simulation
+        SA->>SA: run_round(r)
+        Note over SA: world.run_sim_days(sim_days) → events
+        SA->>SA: prequential eval (doctor + nurse, fed + local)
+        SA->>SA: train doctor + nurse (fed + local shadow)
+        SA->>SA: holdout eval
+        SA->>SA: EndCondition.check(world) → is_done?
+    and done silo
+        SD->>SD: run_round(r) → {num_events:0, trained:0}
     end
 
-    SA-->>Loop: get_weights() → weights
+    SA-->>Loop: get_weights() + get_nurse_weights()
     SA->>SA: release_model()
-    Note over SA: VRAM freed immediately
+    Note over SA: VRAM freed; both learners released
 
-    SD-->>Loop: get_weights() → frozen weights
-
-    Loop->>Loop: global_weights = _fedavg(all_weights, n_examples)
-    Loop->>TR: snapshot(round, global_weights, silos)
-    Note over TR: CLS + logits for global + per-silo fed + local
+    Loop->>Loop: global_weights = _fedavg(doctor_weights, n_examples)
+    Loop->>Loop: global_nurse_weights = _fedavg(nurse_weights, n_examples)
+    Loop->>TR: snapshot(r, global_weights, silo_fed_weights, silo_local_weights)
     Loop->>OLL: update_examples(round_events)
+    Loop->>OLL: update_global_stereotypes(stereo_state)
     Loop->>WB: wandb.log({silo_i/*, aggregated/*}, step=r)
 
     alt all silos is_done
         Loop->>WB: wandb.log({all_silos_done: 1})
         Loop->>TR: save_plots()
-        Note over TR: evolution_global_cls/logits\nfinal_all_models · fl_gain_final
         Note over Loop: Early exit
     end
 ```
@@ -285,62 +281,86 @@ sequenceDiagram
     Note over TR: probe set built once; shared across both runs
 
     CMP->>FED: run_federated_training(cfg, _shared_tracker=TR)
-    Note over FED: standard FL loop
+    Note over FED: builds FLSilo list via _build_fl_silo()
     FED->>TR: snapshot(r, global_weights, silos) each round
     FED->>WB: wandb.log(aggregated/* + silo_N/*)
 
     CMP->>CEN: run_centralized_training(cfg, shared_tracker=TR)
-    Note over CEN: all worlds advance; events pooled; one model trained
+    Note over CEN: builds bare WorldEngine list via _build_bare_world()
     loop each round
         CEN->>CEN: run_round() — advance all N worlds + pool + train
         CEN->>TR: append "centralized" key to existing round snapshot
         CEN->>WB: wandb.log(centralized/*)
-        CEN->>CEN: release_model()
     end
 
     CMP->>TR: save_plots()
-    Note over TR: evolution_global_cls/logits\nfinal_all_models · fl_gain_final\ncomparison_fed_vs_centralized (NEW)
+    Note over TR: evolution_global · fl_gain_final · comparison_fed_vs_centralized
 ```
 
 ---
 
-## Run Presets (`python run.py --preset <name> --mode <mode>`)
+## Run Presets (`python run.py --preset <name>`)
 
-| Preset | Silos | Agents/silo | Diseases | Dirichlet α | Notes |
-|---|:---:|:---:|---|:---:|---|
-| `smoke` | 2 | 15 | Standard Flu | — | Fastest; offline W&B, no Ollama. CI/debug. |
-| `standard` | 3 | 60 | Flu + Mild Corona | 0.3 | Default research run. |
-| `multi-disease` | 5 | 100 | Flu + Corona + Slow Burn | 0.3 | Dirichlet non-IID; all 3 archetypes. |
-| `non-iid` | 3 | varies | per silo (WorldConfig) | — | Explicit asymmetric configs: Flu+Corona / Flu+Sepsis / Sepsis-only. |
-| `hard-triage` | 3 | 80 | Slow Burn + Mild Corona | 0.3 | Hardest triage: circulatory failure + silent hypoxia. |
-| `long-burn` | 3 | 300 | Slow Burn + Mild Corona | 0.3 | sim_days=2; designed for embedding evolution studies. |
+| Preset | Silos | Agents/silo | Diseases | End condition | Notes |
+|---|:---:|:---:|---|---|---|
+| `smoke` | 2 | 15 | Influenza | extinction | Fastest; offline W&B. CI/debug. |
+| `standard` | 3 | 60 | Flu + Mild Corona | extinction | Default research run; Dirichlet α=0.3 |
+| `multi-disease` | 5 | 100 | Flu + Corona + SlowBurn | extinction | 3-archetype Dirichlet non-IID |
+| `non-iid` | 3 | varies | per-silo WorldConfig | extinction | Explicit asymmetric: Flu+Corona / Flu+Sepsis / Sepsis-only |
+| `hard-triage` | 3 | 80 | SlowBurn + Corona | extinction | Hardest triage: circulatory failure + silent hypoxia |
+| `long-burn` | 3 | 300 | SlowBurn + Corona | extinction | sim_days=2; for embedding evolution studies |
+| `sir-cal-2x` | 3 | 150 | Flu + Pneumonia 50/50 | horizon 40d | 2× volume; confusion_rate=0.10; β=2.0; seeds calibration target |
+| `sir-cal-3x` | 3 | 225 | Flu + Pneumonia 50/50 | horizon 40d | 3× volume; confusion_rate=0.10; β=2.0; ~160 events/silo target |
+| `fictional-noniid` | 2 | 75 | Flu (→velarex) / Pneumonia (→sornathis) | horizon 40d | Non-IID fictional disease; Ollama required |
+| `fictional-iid` | 2 | 75 | Flu+Pneumonia 50/50 both silos | horizon 40d | IID fictional disease baseline |
+| `fictional-noniid-explicit` | 2 | 75 | same as fictional-noniid | horizon 40d | + explicit disclaimer: "flu/pneumonia don't exist here" |
+| `fictional-iid-explicit` | 2 | 75 | same as fictional-iid | horizon 40d | + explicit disclaimer |
 
-Modes: `--mode fl` (default), `--mode centralized` (oracle baseline), `--mode compare` (both back-to-back with shared tracker).
+---
+
+## World / FL Decoupling (2026-06-14)
+
+Before this refactor, `WorldEngine` was a god class that held both SIR simulation and
+FL training (replay buffers, LoRA adapters, FedAvg weights).  The clean cut:
+
+```
+simulation/world_config.py   — pure config: WorldConfig / AgentConfig / EpidemicConfig
+simulation/data_sources.py   — DataSource ABC + TemplateDataSource / PhraseLibraryDataSource / OllamaDataSource
+simulation/world.py          — SIR simulation only; run_sim_days() is the only interface FLSilo needs
+fl/silo.py                   — FLSilo: owns world + doctor FLLearner + nurse FLLearner + EndCondition
+fl/train.py                  — orchestrator; _build_fl_silo() / _build_bare_world() factory helpers
+```
+
+Key invariants after the refactor:
+
+- `WorldEngine` never imports `fl.*` — no circular dependency
+- `FLSilo.run_round()` is the unit of federation: advance sim → eval → train → check done
+- `confusion_rate` is a `DataSource` property (not a `WorldEngine` param); TemplateDataSource applies it during `opening_statement()`
+- `EndCondition` is owned by `FLSilo`; `WorldEngine.is_done` is a non-FL shim for static/centralized modes that call `step_tick()` directly
+- Adding a new observation modality (e.g. MIMIC) = implement `DataSource`, inject into `AgentConfig`; zero changes to WorldEngine or FLSilo
 
 ---
 
 ## Label Space
 
-**24 classes** = 8 canonical ICD codes × 3 management tiers (home rest / treat / hospitalise).
+**Doctor model** (disease classifier):
 
-| ICD | Disease / Complaint | Type | Typical management |
-|---|---|---|---|
-| J11.1 | Standard Flu | Infectious | treat / hospitalise |
-| U07.2 | Mild Corona | Infectious | home rest / treat |
-| A41.9 | Slow Burn (Sepsis) | Infectious | treat / hospitalise |
-| M54.5 | Low back pain | Non-infectious | home rest |
-| R51 | Headache | Non-infectious | home rest |
-| F41.1 | Generalised anxiety | Non-infectious | treat |
-| Z87.39 | Hypertension follow-up | Non-infectious | treat |
-| R53.83 | Fatigue | Non-infectious | home rest |
+| Label | Disease / Complaint | Type |
+|---|---|---|
+| `influenza` | Standard Flu (J11.1) | Infectious |
+| `pneumonia` | Bacterial Pneumonia (J18.9) | Infectious |
+| `non-infectious` | Background complaints | Non-infectious |
+| `unknown` | Catch-all / novel | — |
 
-Non-infectious events never reach "hospitalise" in practice — those 5 label slots have zero support and the model learns not to predict them. The infectious/non-infectious split is also encoded visually in embedding plots (circles vs triangles).
+**Nurse model** (severity classifier): `discharge / mild / moderate / severe / critical`
+
+**Fictional disease mode** (`doctor_label_space="fictional_disease"`): maps `influenza → velarex`, `pneumonia → sornathis`.
 
 ---
 
 ## Non-IID Disease Distribution
 
-When `dirichlet_alpha > 0` and multiple progressions are configured, each silo draws a disease probability vector at world construction time:
+When `dirichlet_alpha > 0` and multiple progressions are configured, `_build_sim_world_config()` draws a per-silo disease probability vector:
 
 ```
 p_silo ~ Dirichlet(α, α, …, α)   [one α per disease]
@@ -351,31 +371,15 @@ At infection: disease = rng.choices(progressions, weights=p_silo)[0]
 |:---:|---|
 | 0.05 | Near-deterministic: each silo dominated by one disease |
 | 0.3 | Default: skewed mixes, occasional secondary disease |
-| 1.0 | Uniform Dirichlet: balanced but varied |
+| 1.0 | Balanced but varied |
 | ∞ | IID: all silos see identical proportions |
 
-The `non-iid` preset uses explicit `WorldConfig` per silo (deterministic assignment, equivalent to α→0 for absent diseases). The `multi-disease` preset uses Dirichlet sampling.
+Explicit `WorldConfig` per silo (sir-cal-*, fictional-*, non-iid) bypasses Dirichlet sampling entirely.
 
 ---
 
-## Replay Buffer
+## VRAM Scheduling
 
-Each `WorldFLClient` maintains two independent replay buffers:
-- `_replay_buffer` — for the federated (global) model
-- `_local_replay_buffer` — for the local-only shadow model (fair comparison baseline)
+Each `FLSilo.release_model()` releases both the doctor and nurse `FLLearner` models immediately after weight extraction.  Models are rebuilt lazily on next access.  Peak VRAM = 1 silo's two models at a time, regardless of federation size.
 
-Each round, new events are appended and the full buffer (capped at `replay_buffer_size=2048`) is used for training rather than only the current round's events. This prevents gradient starvation in late-epidemic rounds where new events are sparse.
-
----
-
-## ICD-10 Accuracy Scoring
-
-| Prediction vs Ground Truth | Score | Rationale |
-|---|:---:|---|
-| Exact subcategory match (A41.9 == A41.9) | 1.0 | Correct disease + management |
-| 3-char category match (A41.x == A41.9) | 0.5 | Right disease family |
-| No ICD match | 0.0 | Wrong disease |
-
-**Primary metric `combined_acc`** = `(icd_category_correct AND mgmt_correct) / N`
-
-**FL gain** = `federated_triage_acc − local_only_triage_acc` per round. Positive values indicate the global model outperforms a silo training alone — the core federated learning result.
+On a system where Ollama holds ~3.7 GB (RTX 3050), DistilBERT+LoRA trains on CPU (`training_device="cpu"`) by default.  Pass `training_device="cuda"` only when Ollama is not running.
