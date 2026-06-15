@@ -61,6 +61,7 @@ def generate_probe_events(
     List of DiagnosticEvents with non-empty conversation[0] (patient opening).
     """
     from simulation.world import WorldEngine
+    from simulation.world_config import WorldConfig as SimWorldConfig, AgentConfig, EpidemicConfig
     from simulation.progression import PROGRESSION_STRATEGIES, BenchmarkFeverProgression
 
     rng = _random.Random(seed)
@@ -71,11 +72,11 @@ def generate_probe_events(
 
     for name, strategy in probes.items():
         # Run a small world long enough to populate all severity tiers
-        world = WorldEngine(
-            num_agents=60,
-            seed=rng.randint(0, 99999),
-            progression_strategy=strategy,
+        _wc = SimWorldConfig(
+            agents   = AgentConfig(num_agents=60),
+            epidemic = EpidemicConfig(progressions=[name], disease_strategy=name),
         )
+        world = WorldEngine(_wc, seed=rng.randint(0, 99999))
         for _ in range(40 * world.TICKS_PER_DAY):
             world.step_tick()
 
