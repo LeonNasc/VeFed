@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +77,9 @@ def _infer_scheduled_meta(run_dir: Path, summary: dict) -> dict:
         "distribution": parts[-2] if len(parts) >= 2 else "",
     }
     tag = run_dir.name
-    if "seed" in tag:
-        try:
-            meta["seed"] = int(tag.rsplit("seed", 1)[-1])
-        except ValueError:
-            pass
+    m = re.search(r"_seed(\d+)$", tag)
+    if m:
+        meta["seed"] = int(m.group(1))
     return meta
 
 

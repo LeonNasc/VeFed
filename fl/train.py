@@ -52,19 +52,23 @@ from simulation.end_conditions import EndCondition, from_config as end_condition
 # ── Per-silo world configuration ─────────────────────────────────────────────
 
 @dataclass
-class WorldConfig:
+class SiloPresetConfig:
     """
     Per-silo world configuration for non-IID federated learning experiments.
 
-    When a list of WorldConfig objects is passed to FLTrainConfig.world_configs,
+    When a list of SiloPresetConfig objects is passed to FLTrainConfig.world_configs,
     each silo gets its own disease mix, population size, spread rate, and end
     condition — enabling asymmetric (non-IID) federation.
 
     Example — urban vs. rural silos:
-        WorldConfig(num_agents=150, progressions=["Influenza", "Bacterial Pneumonia"],
-                    disease_strategy="Influenza", beta_scale=1.3)
-        WorldConfig(num_agents=60,  progressions=["Bacterial Pneumonia"],
-                    disease_strategy="Influenza",   beta_scale=0.7)
+        SiloPresetConfig(num_agents=150, progressions=["Influenza", "Bacterial Pneumonia"],
+                         disease_strategy="Influenza", beta_scale=1.3)
+        SiloPresetConfig(num_agents=60,  progressions=["Bacterial Pneumonia"],
+                         disease_strategy="Influenza",  beta_scale=0.7)
+
+    Note: simulation.world_config.WorldConfig is the *nested* config object passed to
+    WorldEngine.  This class is the flat *preset* format used in run.py and FLTrainConfig.
+    They are different classes that serve different abstraction layers.
     """
     num_agents:            int         = 30
     progressions:          list[str]   = field(default_factory=lambda: ["Influenza"])
@@ -83,6 +87,11 @@ class WorldConfig:
     static_mode:           bool        = False
     infectious_fraction:   float       = 0.5   # fraction of visits that are infectious
     cases_per_day:         int         = 20    # clinic throughput per simulated day
+
+
+# Backward-compat alias — run.py and external scripts may still import WorldConfig from here.
+# simulation.world_config.WorldConfig is the *engine* config; this is the flat *preset*.
+WorldConfig = SiloPresetConfig
 
 
 # ── Config dataclass ──────────────────────────────────────────────────────────
@@ -105,7 +114,7 @@ class FLTrainConfig:
     disease_strategy:    str         = "Influenza"
     seed:                int         = 42
     # Per-silo non-IID config (overrides global params when provided)
-    world_configs:       Optional[list[WorldConfig]] = None
+    world_configs:       Optional[list[SiloPresetConfig]] = None
     # Global IID params (used when world_configs is None)
     beta_scale:          float       = 1.0
     initial_seeds:       int         = 3
@@ -416,21 +425,32 @@ def _extract_round_metric(round_num: int, log: dict, n_silos: int) -> dict:
     }
 
 
-def _write_run_json(
-    out_dir,        # Path — dataset dir for this run
-    cfg,            # FLTrainConfig or similar
-    run_id:  str,
-    mode:    str,
+def _flush_round_metrics(out_dir, metrics: list[dict]) -> None:
+    """Rewrite round_metrics.json after every round so a crash doesn't lose prior rounds."""
+    import json as _json
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "round_metrics.json").write_text(_json.dumps(metrics, indent=2))
+
+
+def _write_summary(
+    out_dir,
+    cfg,
+    run_id: str,
+    mode:   str,
     metrics: list[dict],
+    *,
+    diag_key:   str = "agg_diag_acc",
+    triage_key: str = "agg_triage_acc",
 ) -> None:
-    """Write round_metrics.json + summary.json to out_dir."""
+    """Write summary.json (final-accuracy snapshot) at the end of a run."""
     import json as _json
 
     final_diag = final_triage = None
     for m in reversed(metrics):
-        if m.get("agg_diag_acc") is not None:
-            final_diag   = m["agg_diag_acc"]
-            final_triage = m.get("agg_triage_acc")
+        if m.get(diag_key) is not None:
+            final_diag   = m[diag_key]
+            final_triage = m.get(triage_key)
             break
 
     summary = {
@@ -447,8 +467,7 @@ def _write_run_json(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "round_metrics.json").write_text(_json.dumps(metrics,  indent=2))
-    (out_dir / "summary.json"      ).write_text(_json.dumps(summary, indent=2))
+    (out_dir / "summary.json").write_text(_json.dumps(summary, indent=2))
     print(f"  [eval]  {out_dir}/{{round_metrics,summary}}.json")
 
 
@@ -754,6 +773,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
             log["aggregated/all_silos_done"] = 1
             run.log(log, step=round_num)
             _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
+            _flush_round_metrics(_dataset_dir, _run_metrics)
             elapsed = time.time() - t0
             _print_round(round_num, cfg.max_rounds, log, elapsed)
             _report.add_round(round_num, log, [s.last_round_events for s in silos])
@@ -777,6 +797,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
 
         run.log(log, step=round_num)
         _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
+        _flush_round_metrics(_dataset_dir, _run_metrics)
         _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         elapsed = time.time() - t0
@@ -795,7 +816,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     np.savez(str(weights_dir / "fl_final_nurse.npz"), **weights_to_npz(global_nurse_weights))
     print(f"  [weights] {weights_dir}/fl_final{{,_nurse}}.npz")
 
-    _write_run_json(_dataset_dir, cfg, _run_id, "federated", _run_metrics)
+    _write_summary(_dataset_dir, cfg, _run_id, "federated", _run_metrics)
 
     run.finish()
 
@@ -1591,6 +1612,8 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
         f"{'─'*60}\n"
     )
 
+    _run_metrics: list[dict] = []
+
     for round_num in range(1, cfg.max_rounds + 1):
         t0 = time.time()
         log: dict = {"round": round_num}
@@ -1631,6 +1654,8 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
         if all(s.is_done for s in silos):
             log["aggregated/all_silos_done"] = 1
             run.log(log, step=round_num)
+            _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
+            _flush_round_metrics(_dataset_dir, _run_metrics)
             print(f"  Round {round_num:>3} | all silos done | {time.time()-t0:.1f}s")
             break
 
@@ -1643,6 +1668,8 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
             log["aggregated/num_trained"]  = int(agg_trained)
 
         run.log(log, step=round_num)
+        _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
+        _flush_round_metrics(_dataset_dir, _run_metrics)
         elapsed = time.time() - t0
         nan = float("nan")
         print(
@@ -1653,6 +1680,7 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
             f"n={int(agg_trained):>4} | {elapsed:.1f}s"
         )
 
+    _write_summary(_dataset_dir, cfg, _run_id, "local_only", _run_metrics)
     run.finish()
     print(f"\nLocal-only training complete. W&B: {run.url or 'offline'}\n")
     return silos
@@ -1773,6 +1801,8 @@ def run_centralized_training(
     # ── Report ────────────────────────────────────────────────────────────────
     from simulation.report import RunReport
     _run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    _dataset_dir = Path(cfg.dataset_dir) / _run_id
+    _run_metrics: list[dict] = []
     _report      = RunReport(cfg, _run_id)
     _report_path = Path(f"reports/run_{_run_id}_centralized.html")
 
@@ -1835,6 +1865,13 @@ def run_centralized_training(
             "centralized/loss":         m.loss,
         }
         run.log(log, step=round_num)
+        _run_metrics.append({
+            "round":          round_num,
+            "agg_diag_acc":   _nan_to_none(log.get("centralized/diag_acc")),
+            "agg_triage_acc": _nan_to_none(log.get("centralized/triage_acc")),
+            "mean_loss":      _nan_to_none(log.get("centralized/loss")),
+        })
+        _flush_round_metrics(_dataset_dir, _run_metrics)
         _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         def _f(v): return f"{v:.2f}" if v == v else "—"
@@ -1850,6 +1887,7 @@ def run_centralized_training(
             break
 
     trainer.release_model()   # free once, after all rounds complete
+    _write_summary(_dataset_dir, cfg, _run_id, "centralized", _run_metrics)
     run.finish()
 
     if _own_tracker:

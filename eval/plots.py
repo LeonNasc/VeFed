@@ -107,7 +107,7 @@ def accuracy_curves(
             ax.fill_between(xs, lo, hi, color=col, alpha=0.15)
 
     ax.set_xlabel("Round")
-    ax.set_ylabel(metric.replace("_", " ").removeprefix("agg "))
+    ax.set_ylabel(metric.replace("agg_", "").replace("_", " "))
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(axis="y", alpha=0.3)
@@ -201,7 +201,8 @@ def bar_final_accuracy(
         vals   = [table[sv][gv] for gv in group_vals]
         means  = [sum(v) / len(v) if v else 0.0 for v in vals]
         errors = [
-            (max(v) - min(v)) / 2 if len(v) > 1 else 0.0
+            math.sqrt(sum((x - sum(v)/len(v))**2 for x in v) / len(v))
+            if len(v) > 1 else 0.0
             for v in vals
         ]
         offset = (si - n_splits / 2 + 0.5) * width

@@ -173,16 +173,12 @@ class FLSilo:
 
     def set_patient_llm(self, client) -> None:
         """Replace the world's data source with OllamaDataSource(client)."""
-        import dataclasses
-        from simulation.data_sources import OllamaDataSource
-        new_agents = dataclasses.replace(
-            self.world._config.agents,
-            data_source=OllamaDataSource(client=client),
-        )
-        self.world._config = dataclasses.replace(self.world._config, agents=new_agents)
+        self.world.set_patient_llm(client)
 
     def evaluate(self, parameters=None, config=None):
         """Flower evaluate callback shim — delegates to learner holdout eval."""
+        if parameters is not None:
+            self.set_weights(parameters)
         return self.learner.evaluate_holdout()
 
 
@@ -197,10 +193,15 @@ def make_silo(
     seed:        int,
 ) -> "FLSilo":
     """
-    Build one FLSilo from a WorldConfig + FLTrainConfig.
+    Public factory for external FL engines (Flower, FedN, custom orchestrators).
 
-    Separates world construction from the FL orchestration loop so
-    run_federated_training() stays focused on coordination.
+    Separates world construction from the FL orchestration loop so that
+    external engines can instantiate a silo from clean config objects without
+    importing fl.train internals.
+
+    Note: fl.train._build_fl_silo() is the internal analog that handles the
+    flat SiloPresetConfig → SimWorldConfig conversion.  Once that migration
+    is complete, _build_fl_silo should delegate here.
     """
     from simulation.world import WorldEngine
     from fl.learner import FLLearner
