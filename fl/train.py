@@ -393,6 +393,65 @@ def _build_bare_world(
     return WorldEngine(sim_wc, seed=cfg.seed + silo_idx, end_condition=end_cond)
 
 
+# ── Eval / JSON export helpers ────────────────────────────────────────────────
+
+def _nan_to_none(x):
+    """Convert float NaN/inf to None so dicts are JSON-serialisable."""
+    if isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf")):
+        return None
+    return x
+
+
+def _extract_round_metric(round_num: int, log: dict, n_silos: int) -> dict:
+    """Distil the W&B log dict into a compact, JSON-safe round row."""
+    return {
+        "round":           round_num,
+        "agg_diag_acc":    _nan_to_none(log.get("aggregated/diag_acc")),
+        "agg_triage_acc":  _nan_to_none(log.get("aggregated/triage_acc")),
+        "mean_loss":       _nan_to_none(log.get("aggregated/loss")),
+        "n_silos_trained": int(log.get("aggregated/silos_trained", 0)),
+        "silo_diag":   [_nan_to_none(log.get(f"silo_{i}/diag_acc"))   for i in range(n_silos)],
+        "silo_triage": [_nan_to_none(log.get(f"silo_{i}/triage_acc")) for i in range(n_silos)],
+        "sir_i":       [int(log.get(f"silo_{i}/sir_i", 0))            for i in range(n_silos)],
+    }
+
+
+def _write_run_json(
+    out_dir,        # Path — dataset dir for this run
+    cfg,            # FLTrainConfig or similar
+    run_id:  str,
+    mode:    str,
+    metrics: list[dict],
+) -> None:
+    """Write round_metrics.json + summary.json to out_dir."""
+    import json as _json
+
+    final_diag = final_triage = None
+    for m in reversed(metrics):
+        if m.get("agg_diag_acc") is not None:
+            final_diag   = m["agg_diag_acc"]
+            final_triage = m.get("agg_triage_acc")
+            break
+
+    summary = {
+        "experiment":       getattr(cfg, "wandb_run_name", None) or run_id,
+        "mode":             mode,
+        "n_silos":          getattr(cfg, "num_silos", 0),
+        "n_rounds":         len(metrics),
+        "final_diag_acc":   final_diag,
+        "final_triage_acc": final_triage,
+        "seed":             getattr(cfg, "seed", None),
+        "progressions":     getattr(cfg, "progressions", []),
+        "doctor_label_space": getattr(cfg, "doctor_label_space", "disease"),
+    }
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "round_metrics.json").write_text(_json.dumps(metrics,  indent=2))
+    (out_dir / "summary.json"      ).write_text(_json.dumps(summary, indent=2))
+    print(f"  [eval]  {out_dir}/{{round_metrics,summary}}.json")
+
+
 # ── Main training loop ────────────────────────────────────────────────────────
 
 def run_federated_training(cfg: FLTrainConfig | None = None,
@@ -558,6 +617,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     silos[0].release_model()   # free immediately — rebuilt in round 1 with set_weights
 
     _known_stereo_labels: set[str] = set()   # tracks growth across rounds
+    _run_metrics:         list[dict] = []    # per-round rows for JSON export
 
     # ── FL rounds — simulation-guided (run until all silos done or max_rounds) ─
     for round_num in range(1, cfg.max_rounds + 1):
@@ -693,6 +753,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         if all(silo.is_done for silo in silos):
             log["aggregated/all_silos_done"] = 1
             run.log(log, step=round_num)
+            _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
             elapsed = time.time() - t0
             _print_round(round_num, cfg.max_rounds, log, elapsed)
             _report.add_round(round_num, log, [s.last_round_events for s in silos])
@@ -715,6 +776,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
                     log[k] /= agg_n
 
         run.log(log, step=round_num)
+        _run_metrics.append(_extract_round_metric(round_num, log, cfg.num_silos))
         _report.add_round(round_num, log, [s.last_round_events for s in silos])
 
         elapsed = time.time() - t0
@@ -732,6 +794,8 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     np.savez(str(weights_dir / "fl_final.npz"),      **weights_to_npz(global_weights))
     np.savez(str(weights_dir / "fl_final_nurse.npz"), **weights_to_npz(global_nurse_weights))
     print(f"  [weights] {weights_dir}/fl_final{{,_nurse}}.npz")
+
+    _write_run_json(_dataset_dir, cfg, _run_id, "federated", _run_metrics)
 
     run.finish()
 
