@@ -22,9 +22,10 @@ Modes
 Presets (--preset <name>)
 --------------------------
   smoke        2 silos · 15 agents · Influenza · fast smoke test (offline W&B)
-  standard     3 silos · 60 agents · Influenza + Bacterial Pneumonia · typical research run
+  standard     5 silos · 300 agents · non-IID gradient · sim_days=2 · epidemic active ≥20 rounds
   multi-disease 5 silos · 100 agents · Influenza + Bacterial Pneumonia non-IID
   non-iid      5 silos · asymmetric disease mix, beta scale, and population per silo
+  long-noniid-5s  5 silos · 300 agents · sim_days=2 · epidemic active ≥20 rounds · Ollama-ready
   hard-triage  3 silos · Bacterial Pneumonia only · maximum triage difficulty
 """
 from __future__ import annotations
@@ -51,6 +52,7 @@ class RunConfig:
     max_rounds:         int        = 100
     sim_days:           int        = 7
     min_events_to_train: int       = 10
+    fedavg_min_examples: int       = 0
     local_epochs:       int        = 3
     wandb_project:      str        = "fedworld"
     wandb_run_name:     Optional[str] = None
@@ -61,8 +63,19 @@ class RunConfig:
     reveal_incubating_icd:  bool           = True
     beta_scale:             float          = 1.0
     initial_seeds:          int            = 3
+    contact_rate_sigma:     float          = 0.0
     training_device:        str            = "cpu"
     fl_backend:             str            = "inprocess"   # "inprocess" or "flower"
+    # Fictional disease experiment — set to activate fictional prompts + labels
+    disease_glossary:               Optional[list] = None
+    doctor_label_space:             str            = "disease"
+    # Ablation: explicitly tell all LLMs that influenza/pneumonia don't exist.
+    # Only meaningful when disease_glossary is also set.
+    explicit_real_disease_exclusion: bool          = False
+    # Shared-world mode: one SIR world with N hospital districts as FL silos.
+    # Only used when mode == "shared_fl".
+    n_hospitals:              int            = 2
+    hospital_disease_weights: Optional[list] = None  # [[p_flu, p_pneumo], ...] per hospital
 
     def __post_init__(self):
         if self.progressions is None:
@@ -193,16 +206,52 @@ def _make_presets() -> dict[str, RunConfig]:
         ),
 
         # ── standard ──────────────────────────────────────────────────────────
-        # Typical single-session research run: two circulating diseases, Ollama enabled.
+        # Default research run: 5-silo non-IID gradient, Ollama enabled.
+        # sim_days=2 keeps epidemic active for ~25-30 FL rounds (β=2.0 + 300 agents
+        # gives a ~50-60 sim-day arc; sim_days=2 maps that onto rounds 1:1).
         "standard": RunConfig(
             mode                = "fl",
-            num_agents          = 60,
-            num_silos           = 3,
-            progressions        = ["Influenza", "Bacterial Pneumonia"],
+            num_silos           = 5,
             disease_strategy    = "Influenza",
-            end_condition       = "extinction",
-            min_events_to_train = 10,
-            local_epochs        = 10,
+            end_condition       = "horizon",
+            end_condition_param = 60,
+            min_events_to_train = 8,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 30,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=300,
+                            progressions=["Influenza"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=300,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.75, 0.25],
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=300,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=300,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.25, 0.75],
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=300,
+                            progressions=["Bacterial Pneumonia"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+            ],
         ),
 
         # ── multi-disease ─────────────────────────────────────────────────────
@@ -320,6 +369,43 @@ def _make_presets() -> dict[str, RunConfig]:
             local_epochs        = 10,
         ),
 
+        # ── long-noniid-3s ────────────────────────────────────────────────────
+        # 3-silo non-IID run with the long-run philosophy: sim_days=2 maps the
+        # ~50-60 sim-day epidemic arc onto 25-30 FL rounds. Maximum heterogeneity:
+        # pure flu / mixed / pure pneumonia. Ollama-ready (use_ollama not overridden).
+        "long-noniid-3s": RunConfig(
+            mode                = "fl",
+            num_silos           = 3,
+            disease_strategy    = "Influenza",
+            end_condition       = "horizon",
+            end_condition_param = 60,
+            min_events_to_train = 8,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 30,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=150,
+                            progressions=["Influenza"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=150,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+                WorldConfig(num_agents=150,
+                            progressions=["Bacterial Pneumonia"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.0,
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
+            ],
+        ),
+
         # ── long-burn ─────────────────────────────────────────────────────────
         # Designed for embedding evolution studies: large populations + slower
         # spread keep all silos alive for 30+ rounds at 2 sim-days/round.
@@ -345,102 +431,383 @@ def _make_presets() -> dict[str, RunConfig]:
         # fair metric comparison regardless of epidemic stochasticity.
 
         # ── ablation-iid-5s ───────────────────────────────────────────────────
-        # 5 silos, all see the same 50/50 flu+pneumonia mix.
+        # 3 silos, all see the same 50/50 flu+pneumonia mix.
         # Easy FL case — establishes the IID ceiling for federation.
         "ablation-iid-5s": RunConfig(
             mode                = "fl",
-            num_silos           = 5,
+            num_silos           = 3,
             disease_strategy    = "Influenza",
             end_condition       = "horizon",
-            end_condition_param = 200,
-            min_events_to_train = 10,
+            end_condition_param = 40,
+            min_events_to_train = 4,
             local_epochs        = 3,
-            sim_days            = 4,
-            max_rounds          = 50,
+            sim_days            = 2,
+            max_rounds          = 20,
             wandb_offline       = True,
-            use_ollama          = False,
             world_configs       = [
-                WorldConfig(num_agents=300,
+                WorldConfig(num_agents=75,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
-                            disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
-                WorldConfig(num_agents=300,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
-                            disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
-                WorldConfig(num_agents=300,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
-                            disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
-                WorldConfig(num_agents=300,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── sir-cal-2x ───────────────────────────────────────────────────────────
+        # Volume-scaling experiment: 2× agents (150/silo) to test whether doubling
+        # the population linearly doubles clinic events, bringing SIR volume closer
+        # to the controlled ablation target (160 events/silo).  All other parameters
+        # identical to ablation-iid-5s / SIR-cal2.
+        "sir-cal-2x": RunConfig(
+            mode                = "fl",
+            num_silos           = 3,
+            disease_strategy    = "Influenza",
+            end_condition       = "horizon",
+            end_condition_param = 40,
+            min_events_to_train = 3,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 20,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=150,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
-                            disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
-                WorldConfig(num_agents=300,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=150,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
-                            disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=150,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── sir-cal-3x ───────────────────────────────────────────────────────────
+        # Volume-scaling experiment: 3× agents (225/silo) — expected to deliver
+        # ~162 events/silo, matching the controlled ablation's 160-event target.
+        # Confirms (or refutes) linear scaling of clinic visits with population size.
+        "sir-cal-3x": RunConfig(
+            mode                = "fl",
+            num_silos           = 3,
+            disease_strategy    = "Influenza",
+            end_condition       = "horizon",
+            end_condition_param = 40,
+            min_events_to_train = 3,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 20,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=225,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=225,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=225,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            confusion_rate=0.10,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── fictional-noniid ─────────────────────────────────────────────────────
+        # Non-IID experiment with invented diseases (Velarex + Sornathis) to
+        # eliminate phi3:mini's pretraining prior.  Silo 0 sees only Velarex;
+        # silo 1 sees only Sornathis — maximum heterogeneity.
+        # Use --mode fl / local_only / centralized for the three-way comparison.
+        "fictional-noniid": RunConfig(
+            mode                = "fl",
+            num_silos           = 2,
+            disease_glossary    = ["velarex", "sornathis"],
+            doctor_label_space  = "fictional_disease",
+            end_condition       = "horizon",
+            end_condition_param = 40,
+            min_events_to_train = 4,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 20,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Sornathis"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── fictional-iid ─────────────────────────────────────────────────────
+        # IID baseline for fictional disease experiment: both silos see a 50/50
+        # mix of Velarex and Sornathis — establishes the IID ceiling.
+        "fictional-iid": RunConfig(
+            mode                = "fl",
+            num_silos           = 2,
+            disease_glossary    = ["velarex", "sornathis"],
+            doctor_label_space  = "fictional_disease",
+            end_condition       = "horizon",
+            end_condition_param = 40,
+            min_events_to_train = 4,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 20,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex", "Sornathis"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex", "Sornathis"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── fictional-noniid-explicit ────────────────────────────────────────────
+        # Same as fictional-noniid but with an explicit disclaimer injected into
+        # every LLM prompt stating that influenza and pneumonia don't exist in
+        # this world.  Ablation: tests whether naming-based novelty (Velarex/
+        # Sornathis) does more work than explicit exclusion of real disease priors.
+        "fictional-noniid-explicit": RunConfig(
+            mode                             = "fl",
+            num_silos                        = 2,
+            disease_glossary                 = ["velarex", "sornathis"],
+            doctor_label_space               = "fictional_disease",
+            explicit_real_disease_exclusion  = True,
+            end_condition                    = "horizon",
+            end_condition_param              = 40,
+            min_events_to_train              = 4,
+            local_epochs                     = 3,
+            sim_days                         = 2,
+            max_rounds                       = 20,
+            wandb_offline                    = True,
+            world_configs                    = [
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Sornathis"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── fictional-iid-explicit ───────────────────────────────────────────────
+        # Same as fictional-iid but with explicit real-disease exclusion disclaimer.
+        "fictional-iid-explicit": RunConfig(
+            mode                             = "fl",
+            num_silos                        = 2,
+            disease_glossary                 = ["velarex", "sornathis"],
+            doctor_label_space               = "fictional_disease",
+            explicit_real_disease_exclusion  = True,
+            end_condition                    = "horizon",
+            end_condition_param              = 40,
+            min_events_to_train              = 4,
+            local_epochs                     = 3,
+            sim_days                         = 2,
+            max_rounds                       = 20,
+            wandb_offline                    = True,
+            world_configs                    = [
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex", "Sornathis"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Velarex", "Sornathis"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
             ],
         ),
 
         # ── ablation-noniid-5s ────────────────────────────────────────────────
-        # 5 silos with a monotone disease gradient: pure flu → mixed → pure pneumonia.
-        # Silos 0 and 4 never see the other disease locally — max heterogeneity.
+        # 3 silos with a monotone disease gradient: pure flu → mixed → pure pneumonia.
+        # Silos 0 and 2 never see the other disease locally — max heterogeneity.
         # Used for: centralized oracle, local-only baseline, and FL non-IID run.
         "ablation-noniid-5s": RunConfig(
+            mode                = "fl",
+            num_silos           = 3,
+            disease_strategy    = "Influenza",
+            end_condition       = "horizon",
+            end_condition_param = 40,
+            min_events_to_train = 4,
+            local_epochs        = 3,
+            sim_days            = 2,
+            max_rounds          = 20,
+            wandb_offline       = True,
+            world_configs       = [
+                WorldConfig(num_agents=75,
+                            progressions=["Influenza"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Influenza", "Bacterial Pneumonia"],
+                            disease_weights=[0.5, 0.5],
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+                WorldConfig(num_agents=75,
+                            progressions=["Bacterial Pneumonia"],
+                            disease_weights=None,
+                            disease_strategy="Influenza", beta_scale=2.00,
+                            initial_seeds=8, contact_rate_sigma=0.5,
+                            end_condition="horizon", end_condition_param=40),
+            ],
+        ),
+
+        # ── long-noniid-5s ────────────────────────────────────────────────────
+        # 5-silo non-IID run designed for epidemic-active training across ≥20 FL
+        # rounds. Key insight: with β=2.0 and 300 agents, the epidemic arc lasts
+        # ~50-60 sim-days. sim_days=2 maps that onto 25-30 FL rounds instead of
+        # 12-15 at sim_days=4. Horizon=60 (30 rounds) caps total wall time.
+        # Intended for Ollama runs — use_ollama not hard-coded, defaults to True.
+        "long-noniid-5s": RunConfig(
             mode                = "fl",
             num_silos           = 5,
             disease_strategy    = "Influenza",
             end_condition       = "horizon",
-            end_condition_param = 200,
-            min_events_to_train = 10,
+            end_condition_param = 60,   # 30 rounds × 2 sim_days
+            min_events_to_train = 8,
             local_epochs        = 3,
-            sim_days            = 4,
-            max_rounds          = 50,
+            sim_days            = 2,
+            max_rounds          = 30,
             wandb_offline       = True,
-            use_ollama          = False,
             world_configs       = [
                 WorldConfig(num_agents=300,
                             progressions=["Influenza"],
                             disease_weights=None,
                             disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
                 WorldConfig(num_agents=300,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.75, 0.25],
                             disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
                 WorldConfig(num_agents=300,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.5, 0.5],
                             disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
                 WorldConfig(num_agents=300,
                             progressions=["Influenza", "Bacterial Pneumonia"],
                             disease_weights=[0.25, 0.75],
                             disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
                 WorldConfig(num_agents=300,
                             progressions=["Bacterial Pneumonia"],
                             disease_weights=None,
                             disease_strategy="Influenza", beta_scale=2.0,
-                            initial_seeds=10,
-                            end_condition="horizon", end_condition_param=200),
+                            initial_seeds=5,
+                            end_condition="horizon", end_condition_param=60),
             ],
+        ),
+
+        # ══ Shared-world presets (Q42) ═══════════════════════════════════════
+        # One large SIR world, N hospital districts as FL silos.
+        # Eliminates phase-asynchrony noise from independent SIRs.
+        # Geographic seeding creates non-IID: hospital 0 contracts flu more,
+        # hospital 1 contracts pneumonia more (matching city-hospital intuition).
+
+        # ── shared-iid ────────────────────────────────────────────────────────
+        # IID baseline: both hospitals have identical 50/50 disease weights.
+        # Establishes that FL works in the easy shared-world case.
+        "shared-iid": RunConfig(
+            mode                     = "shared_fl",
+            n_hospitals              = 2,
+            num_agents               = 800,
+            progressions             = ["Influenza", "Bacterial Pneumonia"],
+            hospital_disease_weights = [[0.5, 0.5], [0.5, 0.5]],
+            end_condition            = "horizon",
+            end_condition_param      = 200,
+            min_events_to_train      = 10,
+            local_epochs             = 3,
+            sim_days                 = 4,
+            max_rounds               = 50,
+            wandb_offline            = True,
+            use_ollama               = False,
+        ),
+
+        # ── shared-noniid ─────────────────────────────────────────────────────
+        # Geographic non-IID: hospital 0 district is flu-dominant (80/20),
+        # hospital 1 district is pneumonia-dominant (20/80).
+        # Same epidemic arc, different local disease distributions — mirrors
+        # hospitals in different neighbourhoods of the same city.
+        "shared-noniid": RunConfig(
+            mode                     = "shared_fl",
+            n_hospitals              = 2,
+            num_agents               = 800,
+            progressions             = ["Influenza", "Bacterial Pneumonia"],
+            hospital_disease_weights = [[0.8, 0.2], [0.2, 0.8]],
+            end_condition            = "horizon",
+            end_condition_param      = 200,
+            min_events_to_train      = 10,
+            local_epochs             = 3,
+            sim_days                 = 4,
+            max_rounds               = 50,
+            wandb_offline            = True,
+            use_ollama               = False,
         ),
     }
 
@@ -452,15 +819,28 @@ PRESET_DESCRIPTIONS = {
     "extreme-noniid":"2 silos · 150 agents · flu-only vs pneumonia-only · maximum heterogeneity",
     # ── Other presets ─────────────────────────────────────────────────────────
     "smoke":         "2 silos · 15 agents · Influenza · fast smoke test (offline W&B, no Ollama)",
-    "standard":      "3 silos · 60 agents · Influenza + Bacterial Pneumonia · typical research run",
+    "standard":      "5 silos · 300 agents · non-IID gradient · sim_days=2 · epidemic active ≥20 rounds · Ollama-ready",
     "multi-disease": "5 silos · 100 agents · Influenza + Bacterial Pneumonia · Dirichlet non-IID",
     "non-iid-10":    "10 silos · deterministic single-disease (5×Influenza / 5×Bacterial Pneumonia)",
     "static-noniid": "5 silos · no SIR · fixed cases/day · infectious_fraction slider",
     "hard-triage":   "3 silos · Bacterial Pneumonia only · maximum triage difficulty",
     "long-burn":        "3 silos · 300 agents · Influenza + Bacterial Pneumonia · sim_days=2 · embedding studies",
+    # ── Fictional disease experiment ──────────────────────────────────────────
+    "fictional-noniid":          "2 silos · 75 agents · Velarex-only vs Sornathis-only · fictional non-IID",
+    "fictional-iid":             "2 silos · 75 agents · Velarex+Sornathis 50/50 both silos · fictional IID",
+    "fictional-noniid-explicit": "2 silos · 75 agents · fictional non-IID + explicit flu/pneumonia exclusion disclaimer",
+    "fictional-iid-explicit":    "2 silos · 75 agents · fictional IID + explicit flu/pneumonia exclusion disclaimer",
     # ── 5-silo overnight ablation ─────────────────────────────────────────────
     "ablation-iid-5s":    "5 silos · 300 agents · flu+pneumonia 50/50 all silos · IID ceiling",
+    # ── SIR volume-scaling ────────────────────────────────────────────────────
+    "sir-cal-2x":  "3 silos · 150 agents/silo · 2× volume-scaling baseline vs ablation-iid-5s",
+    "sir-cal-3x":  "3 silos · 225 agents/silo · 3× volume-scaling; targets ~160 events/silo to match controlled",
     "ablation-noniid-5s": "5 silos · 300 agents · pure-flu → mixed → pure-pneumo gradient · max heterogeneity",
+    "long-noniid-3s":     "3 silos · 300 agents · flu-only / mixed / pneumo-only · sim_days=2 · Ollama-ready",
+    "long-noniid-5s":     "5 silos · 300 agents · non-IID gradient · sim_days=2 → epidemic active ≥20 rounds",
+    # ── Shared-world (Q42) ────────────────────────────────────────────────────
+    "shared-iid":         "1 world · 2 hospital districts · 800 agents · IID 50/50 · phase-sync baseline",
+    "shared-noniid":      "1 world · 2 hospital districts · 800 agents · geo non-IID (80/20 vs 20/80)",
 }
 
 
@@ -763,7 +1143,7 @@ def _parse_cli() -> RunConfig:
     p.add_argument("--preset", choices=list(PRESET_DESCRIPTIONS), default=None,
                    help="Load a named preset; other flags override individual fields")
     p.add_argument("--mode", choices=["tui", "rogue", "pygame", "fl", "local_only", "centralized", "compare",
-                                      "static_centralized", "static_local"], default=None)
+                                      "static_centralized", "static_local", "shared_fl"], default=None)
     p.add_argument("--agents",   type=int, default=None)
     p.add_argument("--seed",     type=int, default=None)
     p.add_argument("--progressions", nargs="+", default=None,
@@ -782,15 +1162,21 @@ def _parse_cli() -> RunConfig:
     p.add_argument("--sim-days",   type=int, default=None, dest="sim_days")
     p.add_argument("--min-events", type=int, default=None, dest="min_events_to_train",
                    help="Skip LoRA training if fewer events this round")
+    p.add_argument("--fedavg-min-examples", type=int, default=None, dest="fedavg_min_examples",
+                   help="Exclude silos with fewer training examples than this from FedAvg aggregate (0 = include all)")
     p.add_argument("--epochs",     type=int, default=None, dest="local_epochs")
     p.add_argument("--wandb-project",  default=None, dest="wandb_project")
     p.add_argument("--wandb-run-name", default=None, dest="wandb_run_name")
     p.add_argument("--offline",        action="store_true", default=False, dest="wandb_offline")
     p.add_argument("--no-ollama",      action="store_true", default=False)
+    p.add_argument("--ollama",         action="store_true", default=False,
+                   help="Force Ollama on even when the preset disables it")
     p.add_argument("--beta-scale",     type=float, default=None, dest="beta_scale",
                    help="Transmission rate multiplier (default 1.0; <1 slows spread)")
     p.add_argument("--initial-seeds",  type=int,   default=None, dest="initial_seeds",
                    help="Number of agents infected at simulation start (default 3)")
+    p.add_argument("--contact-rate-sigma", type=float, default=None, dest="contact_rate_sigma",
+                   help="Std-dev of per-agent contact-rate heterogeneity (default 0.0 = uniform)")
     p.add_argument("--training-device", type=str, default=None, dest="training_device",
                    choices=["cpu", "cuda"],
                    help="Device for LoRA training (default: cpu — safe when Ollama is on GPU)")
@@ -817,14 +1203,17 @@ def _parse_cli() -> RunConfig:
     if a.silos             is not None: cfg.num_silos           = a.silos
     if a.max_rounds        is not None: cfg.max_rounds          = a.max_rounds
     if a.sim_days          is not None: cfg.sim_days            = a.sim_days
-    if a.min_events_to_train is not None: cfg.min_events_to_train = a.min_events_to_train
+    if a.min_events_to_train    is not None: cfg.min_events_to_train    = a.min_events_to_train
+    if a.fedavg_min_examples    is not None: cfg.fedavg_min_examples    = a.fedavg_min_examples
     if a.local_epochs      is not None: cfg.local_epochs        = a.local_epochs
     if a.wandb_project     is not None: cfg.wandb_project       = a.wandb_project
     if a.wandb_run_name    is not None: cfg.wandb_run_name      = a.wandb_run_name
     if a.wandb_offline:                 cfg.wandb_offline       = True
     if a.no_ollama:                     cfg.use_ollama          = False
-    if a.beta_scale      is not None:   cfg.beta_scale          = a.beta_scale
-    if a.initial_seeds   is not None:   cfg.initial_seeds       = a.initial_seeds
+    if a.ollama:                        cfg.use_ollama          = True
+    if a.beta_scale           is not None: cfg.beta_scale          = a.beta_scale
+    if a.initial_seeds        is not None: cfg.initial_seeds       = a.initial_seeds
+    if a.contact_rate_sigma   is not None: cfg.contact_rate_sigma  = a.contact_rate_sigma
     if a.training_device is not None:   cfg.training_device     = a.training_device
     if a.fl_backend      is not None:   cfg.fl_backend          = a.fl_backend
 
@@ -845,6 +1234,10 @@ def _launch(cfg: RunConfig) -> None:
 
     if cfg.mode == "fl":
         _launch_fl(cfg)
+        return
+
+    if cfg.mode == "shared_fl":
+        _launch_shared(cfg)
         return
 
     if cfg.mode == "local_only":
@@ -889,7 +1282,7 @@ def _launch(cfg: RunConfig) -> None:
         print(f"Patient LLM: {patient_llm.model} active")
     else:
         patient_llm = None
-        print(f"Patient LLM: unreachable — using templates (ollama pull tinyllama)")
+        print(f"Patient LLM: unreachable — using templates (ollama pull phi3:mini)")
 
     client      = OllamaDiagnosticClient(patient_llm=patient_llm)
     ollama_error = None
@@ -943,6 +1336,7 @@ def _make_fl_cfg(cfg: RunConfig) -> "FLTrainConfig":
         num_agents          = cfg.num_agents,
         sim_days            = cfg.sim_days,
         min_events_to_train = cfg.min_events_to_train,
+        fedavg_min_examples = cfg.fedavg_min_examples,
         local_epochs        = cfg.local_epochs,
         progressions        = cfg.progressions,
         disease_strategy    = cfg.disease_strategy,
@@ -956,14 +1350,45 @@ def _make_fl_cfg(cfg: RunConfig) -> "FLTrainConfig":
         world_configs       = cfg.world_configs,
         beta_scale          = cfg.beta_scale,
         initial_seeds       = cfg.initial_seeds,
+        contact_rate_sigma  = cfg.contact_rate_sigma,
         training_device     = cfg.training_device,
         fl_backend          = cfg.fl_backend,
+        disease_glossary                 = cfg.disease_glossary,
+        doctor_label_space               = cfg.doctor_label_space,
+        explicit_real_disease_exclusion  = cfg.explicit_real_disease_exclusion,
+    )
+
+
+def _make_shared_cfg(cfg: RunConfig) -> "SharedWorldConfig":
+    from fl.train import SharedWorldConfig
+    return SharedWorldConfig(
+        n_hospitals              = cfg.n_hospitals,
+        n_agents                 = cfg.num_agents,
+        progressions             = cfg.progressions,
+        hospital_disease_weights = cfg.hospital_disease_weights,
+        end_condition            = cfg.end_condition,
+        end_condition_param      = cfg.end_condition_param or 200,
+        min_events_to_train      = cfg.min_events_to_train,
+        local_epochs             = cfg.local_epochs,
+        sim_days                 = cfg.sim_days,
+        max_rounds               = cfg.max_rounds,
+        seed                     = cfg.seed,
+        training_device          = cfg.training_device,
+        wandb_project            = cfg.wandb_project,
+        wandb_run_name           = cfg.wandb_run_name,
+        wandb_offline            = cfg.wandb_offline,
+        use_ollama               = cfg.use_ollama,
     )
 
 
 def _launch_fl(cfg: RunConfig) -> None:
     from fl.train import run_federated_training
     run_federated_training(_make_fl_cfg(cfg))
+
+
+def _launch_shared(cfg: RunConfig) -> None:
+    from fl.train import run_shared_world_training
+    run_shared_world_training(_make_shared_cfg(cfg))
 
 
 def _launch_local_only(cfg: RunConfig) -> None:

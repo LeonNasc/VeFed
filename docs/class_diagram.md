@@ -1,12 +1,12 @@
 # Class Diagram — Federated Simulated World
 
-**Last updated: 2026-05-30**
+**Last updated: 2026-06-14**
 
 Render with any Mermaid-compatible viewer (GitHub, VS Code Mermaid Preview, mermaid.live).
 
 Three diagrams are provided:
-- **A** — Simulation core (world engine, agents, disease model, complaint types, LLM layer)
-- **B** — Federated learning layer (FL clients, centralized baseline, aggregation, end conditions)
+- **A** — Simulation core (world engine, config hierarchy, agents, disease model, data sources, LLM layer)
+- **B** — Federated learning layer (FLSilo, FLLearner, aggregation, end conditions)
 - **C** — Visualisation & reporting layer
 
 ---
@@ -17,30 +17,99 @@ Three diagrams are provided:
 classDiagram
     direction TB
 
+    %% ── Configuration Hierarchy ──────────────────────────────────────────────
+    class WorldConfig {
+        +agents : AgentConfig
+        +epidemic : EpidemicConfig
+        +seed_offset : int
+        +reveal_incubating_icd : bool
+    }
+
+    class AgentConfig {
+        +num_agents : int
+        +data_source : DataSource
+        Note: injected at construction; swap for Ollama/MIMIC
+        +background_visit_rate : float
+    }
+
+    class EpidemicConfig {
+        +progressions : list[str]
+        +disease_strategy : str
+        +disease_weights : list[float]
+        Note: None = uniform; Dirichlet-sampled per silo
+        +beta_scale : float
+        +initial_seeds : int
+        +contact_rate_sigma : float
+        +static_mode : bool
+        +infectious_fraction : float
+        +cases_per_day : int
+    }
+
+    WorldConfig *-- AgentConfig
+    WorldConfig *-- EpidemicConfig
+
+    %% ── DataSource Strategy ──────────────────────────────────────────────────
+    class DataSource {
+        <<abstract>>
+        +opening_statement(inner_state, days, personality) str
+    }
+
+    class TemplateDataSource {
+        +confusion_rate : float
+        Note: fraction of visits with swapped disease text; label stays correct
+        -_narrator : SymptomNarrator
+        +opening_statement(inner_state, days, personality) str
+    }
+
+    class PhraseLibraryDataSource {
+        +confusion_rate : float
+        -_lib : PhraseLibrary
+        Note: 675 phrases × disease × severity × personality
+        +opening_statement(inner_state, days, personality) str
+    }
+
+    class OllamaDataSource {
+        -_client : PatientLLMClient
+        -_fallback : TemplateDataSource
+        Note: falls back to template on LLM failure
+        +opening_statement(inner_state, days, personality) str
+    }
+
+    DataSource <|-- TemplateDataSource
+    DataSource <|-- PhraseLibraryDataSource
+    DataSource <|-- OllamaDataSource
+    AgentConfig --> DataSource
+
     %% ── World Engine ─────────────────────────────────────────────────────────
     class WorldEngine {
+        -_config : WorldConfig
         +agents : list[Agent]
         +locations : dict[str, Location]
         +sir_model : SIRModel
         +clinic_queue : ClinicQueue
         +strategy : DiseaseStrategy
         +progressions : list[DiseaseProgressionStrategy]
-        +end_condition : EndCondition
-        +background_visit_rate : float
-        +disease_weights : list[float]
-        Note: Dirichlet-sampled per silo
         +current_day : int
+        +event_log : list[str]
+        +epidemic_active : bool
+        Note: True while sir_model.I > 0
         +is_done : bool
+        Note: non-FL shim — checks optional _end_condition or epidemic_active
         +stop_reason : str
         +step_tick()
-        +inject_disease_cloud(location_id, intensity)
-        +collect_end_of_day_cases() list
-        -_collect_background_cases() list
-        Note: returns NonInfectiousComplaint visits
+        +run_sim_days(n) list[DiagnosticEvent]
+        Note: primary interface for FLSilo; dispatches to SIR or static
+        +set_patient_llm(client)
+        Note: shim — replaces data_source with OllamaDataSource(client)
+        +register_diagnostic_fn(fn)
+        +attach_interaction_logger(logger)
         -_generate_opening(agent, event) str
-        Note: routes to PatientLLMClient or templates
-        +run_fl_round()
+        Note: delegates to config.agents.data_source
+        -_run_sir_days(n) list
+        -_run_static_days(n) list
     }
+
+    WorldEngine --> WorldConfig
 
     %% ── Agent ────────────────────────────────────────────────────────────────
     class Agent {
@@ -52,7 +121,6 @@ classDiagram
         +hospitalised : bool
         +inner_state : InnerState
         +should_seek_care() bool
-        +opening_statement() str
         +followup_answer(question) str
         +build_diagnostic_event() DiagnosticEvent
         +apply_daily_infection(progression, disease_weights) bool
@@ -74,6 +142,7 @@ classDiagram
         +severity : float
         +symptoms : float
         +days_infected : int
+        +disease_name : str
         +trend : str
         +fatigue : float
         +pain : float
@@ -81,13 +150,20 @@ classDiagram
         +top_vital : tuple
     }
 
+    WorldEngine "1" *-- "N" Agent
+    WorldEngine "1" *-- "1" SIRModel
+    WorldEngine "1" *-- "1" ClinicQueue
+    WorldEngine --> DiseaseStrategy
+    WorldEngine "1" --> "1..*" DiseaseProgressionStrategy
+
+    Agent "1" *-- "1" HealthState
+    Agent "1" ..> "1" InnerState : computes
+
     %% ── Disease Trajectory ───────────────────────────────────────────────────
     class DiseaseTrajectory {
         +peak_severity : float
         +rise_days : float
         +decay_rate : float
-        +symptom_sensitivity : float
-        +severity_floor_weight : float
         +disease_name : str
         +icd_code : str
         +incubation_days : int
@@ -95,58 +171,46 @@ classDiagram
         +trend : str
         +cleared : bool
         +step() tuple[float,float]
-        +apply_treatment(decay_boost)
     }
+
+    HealthState --> DiseaseTrajectory
 
     %% ── Non-Infectious Complaints ────────────────────────────────────────────
     class NonInfectiousComplaint {
         <<dataclass, frozen>>
         +name : str
         +icd_code : str
+        +disease : str
         +management : str
-        Note: home rest or treat
         +prompt_context : str
-        Note: injected into patient LLM system prompt
     }
 
-    class NON_INFECTIOUS_COMPLAINTS {
-        <<registry>>
-        M54.5 — Low back pain
-        R51   — Headache
-        F41.1 — Generalised anxiety
-        Z87.39 — Hypertension follow-up
-        R53.83 — Fatigue
-    }
-
-    %% ── Case Table ───────────────────────────────────────────────────────────
-    class CaseTable {
-        +variables : list[str]
-        +get(variable, day) float
-        +band(variable, day) str
-    }
-    class MimicCaseTable {
-        +_load_from_record(record) dict
-    }
+    WorldEngine ..> NonInfectiousComplaint : samples randomly
 
     %% ── LLM Layer ────────────────────────────────────────────────────────────
     class PatientLLMClient {
         +model : str
-        Note: tinyllama (frozen, never fine-tuned)
+        Note: phi3:mini — frozen, never fine-tuned
         +opening_statement(severity, days, personality) str
         +complaint_opening(prompt_context, personality) str
-        Note: for non-infectious complaint visits
         +followup_answer(question, severity, personality, case_table, day) str
         +health_check() bool
     }
 
     class OllamaDiagnosticClient {
         +model : str
-        Note: phi3:mini
-        +diagnose(event, _queue) DiagnosticEvent
+        +disease_glossary : list[str]
+        Note: fictional disease names; None = standard mode
+        +explicit_exclusion : bool
+        +diagnose(event, _queue, _proto_lib) DiagnosticEvent
         +update_examples(round_events)
         Note: federated few-shot bank
+        +update_global_stereotypes(state, n_silos)
         +health_check() bool
     }
+
+    OllamaDataSource --> PatientLLMClient
+    WorldEngine ..> OllamaDiagnosticClient : via register_diagnostic_fn()
 
     %% ── Symptom Narration ────────────────────────────────────────────────────
     class SymptomNarrator {
@@ -161,6 +225,10 @@ classDiagram
         ANXIOUS
     }
 
+    TemplateDataSource --> SymptomNarrator
+    SymptomNarrator ..> Personality
+    Agent ..> Personality
+
     %% ── Diagnostic Pipeline ──────────────────────────────────────────────────
     class DiagnosticEvent {
         +agent_id : str
@@ -168,15 +236,14 @@ classDiagram
         +symptoms : float
         +days_infected : int
         +ground_truth : str
-        Note: ICD-code / management-tier
-        Note: e.g. A41.9 / treat
+        Note: ICD-code label for FL classifier
+        +gt_disease : str
+        +gt_severity : str
         +conversation : list
         +case_table : CaseTable
         +action : DiagnosticAction
         +is_background : bool
-        Note: True for non-infectious visits
-        +complaint_context : str
-        Note: prompt hint for patient LLM
+        +opening : str
         +num_turns : int
     }
 
@@ -198,6 +265,8 @@ classDiagram
         +step(agents)
     }
 
+    ClinicQueue "1" o-- "N" DiagnosticEvent
+
     %% ── Disease Strategies ───────────────────────────────────────────────────
     class DiseaseStrategy {
         <<abstract>>
@@ -214,62 +283,16 @@ classDiagram
         +icd_code : str
         +sample_trajectory(rng) DiseaseTrajectory
     }
-    class StandardFluProgression {
-        icd_code = J11.1
-        incubation = 2d
-    }
-    class MildCoronaProgression {
-        icd_code = U07.2
-        incubation = 4d
-        silent hypoxia pattern
-    }
-    class SlowBurnProgression {
-        icd_code = A41.9
-        incubation = 4d
-        floor_weight = 0.15
-    }
-    class MimicProgression {
-        icd_code per diagnosis_group
-    }
-    note for MimicProgression "AggressiveFlu (J09.X1), PersistentFlu (J10.89)\nand Deadly (J18.9) exist as classes but are\nexcluded from PROGRESSION_STRATEGIES registry.\nThe active registry contains: StandardFlu,\nMildCorona, SlowBurn, MIMIC."
-
-    %% ── Relationships ────────────────────────────────────────────────────────
-    WorldEngine "1" *-- "N" Agent
-    WorldEngine "1" *-- "1" SIRModel
-    WorldEngine "1" *-- "1" ClinicQueue
-    WorldEngine --> DiseaseStrategy
-    WorldEngine "1" --> "1..*" DiseaseProgressionStrategy
-    WorldEngine ..> NonInfectiousComplaint : samples randomly
-
-    Agent "1" *-- "1" HealthState
-    Agent "1" ..> "1" InnerState : computes
-    Agent "1" *-- "1" CaseTable
-    Agent "1" *-- "1" SymptomNarrator
-
-    HealthState --> DiseaseTrajectory
-
-    ClinicQueue "1" o-- "N" DiagnosticEvent
-    DiagnosticEvent --> CaseTable
-
-    CaseTable <|-- MimicCaseTable
+    class InfluenzaProgression { icd_code = J11.1 }
+    class BacterialPneumoniaProgression { icd_code = J18.9 }
+    class SlowBurnProgression { icd_code = A41.9 }
 
     DiseaseStrategy <|-- StandardFluStrategy
     DiseaseStrategy <|-- MildCoronaStrategy
     DiseaseStrategy <|-- SlowBurnStrategy
-
-    DiseaseProgressionStrategy <|-- StandardFluProgression
-    DiseaseProgressionStrategy <|-- MildCoronaProgression
+    DiseaseProgressionStrategy <|-- InfluenzaProgression
+    DiseaseProgressionStrategy <|-- BacterialPneumoniaProgression
     DiseaseProgressionStrategy <|-- SlowBurnProgression
-    DiseaseProgressionStrategy <|-- MimicProgression
-
-    NON_INFECTIOUS_COMPLAINTS "1" o-- "5" NonInfectiousComplaint
-
-    SymptomNarrator ..> Personality
-    Agent ..> Personality
-
-    WorldEngine ..> PatientLLMClient : optional, wired at startup
-    WorldEngine ..> OllamaDiagnosticClient : via register_diagnostic_fn()
-    PatientLLMClient ..> NonInfectiousComplaint : uses prompt_context
 ```
 
 ---
@@ -300,51 +323,105 @@ classDiagram
     EndCondition <|-- AnyCondition
     AnyCondition o-- EndCondition
 
-    %% ── Config ───────────────────────────────────────────────────────────────
-    class WorldConfig {
-        +num_agents : int
-        +progressions : list[str]
-        +disease_strategy : str
-        +beta_scale : float
-        +background_visit_rate : float
-        +end_condition : str
-        +seed_offset : int
-        +initial_seeds : int
+    %% ── FLSilo (FL participant) ──────────────────────────────────────────────
+    class FLSilo {
+        +world : WorldEngine
+        +learner : FLLearner
+        Note: doctor — disease + severity classifier
+        +nurse_learner : FLLearner
+        Note: triage nurse — severity-only classifier
+        +sim_days : int
+        +min_events_to_train : int
+        +is_done : bool
+        +stop_reason : str
+        +last_round_events : list[DiagnosticEvent]
+        +run_round(round_num) dict
+        Note: advance sim → prequential eval → train → holdout eval → end check
+        +get_weights() list[ndarray]
+        +set_weights(weights)
+        +get_nurse_weights() list[ndarray]
+        +set_nurse_weights(weights)
+        +release_model()
+        Note: frees VRAM for both learners; peak = 1 silo at a time
+        +try_accept_global(weights) bool
+        +set_patient_llm(client)
+        Note: replaces world DataSource with OllamaDataSource
+        +register_diagnostic_fn(fn)
+        +clinic_queue
+        +sir_model
     }
 
+    FLSilo --> WorldEngine
+    FLSilo --> FLLearner
+    FLSilo --> EndCondition
+
+    %% ── FLLearner ────────────────────────────────────────────────────────────
+    class FLLearner {
+        +label_space : str
+        Note: disease / severity / fictional_disease
+        +lora_config : LoRAConfig
+        +dataset : SiloDataset
+        +train_sample_cap : int
+        +device : str
+        +model
+        Note: lazy-built DistilBERT+LoRA
+        +local_model
+        Note: shadow model never receiving global weights
+        +train(events, round_num) tuple[int, list[float]]
+        +train_local(events, round_num)
+        +evaluate(events) dict
+        +evaluate_local(events) dict
+        +evaluate_holdout() dict
+        +get_weights() list[ndarray]
+        +set_weights(weights)
+        +release()
+        +try_accept_global(weights) bool
+        +snapshot_for_freeze(events)
+    }
+
+    %% ── SiloDataset ──────────────────────────────────────────────────────────
+    class SiloDataset {
+        +silo_id : int
+        +holdout_fraction : float
+        +append(events)
+        +load_train() list
+        +load_holdout() list
+        +sample_train(n) list
+        +size() tuple[int, int]
+    }
+
+    FLLearner --> SiloDataset
+
+    %% ── Config ───────────────────────────────────────────────────────────────
     class FLTrainConfig {
         +num_silos : int
         +max_rounds : int
         Note: simulation-guided; safety cap
-        +num_agents : int
         +sim_days : int
         +local_epochs : int
-        Note: default 10
         +lr : float
         +lora_rank : int
         +dirichlet_alpha : float
-        Note: default 0.3; controls non-IID degree
-        +replay_buffer_size : int
-        Note: default 2048
-        +progressions : list[str]
-        +end_condition : str
+        Note: 0.3 default; controls non-IID degree
         +world_configs : list[WorldConfig]
-        Note: per-silo non-IID override
+        Note: flat per-silo override (from fl/train.py); None = global params
+        +doctor_label_space : str
+        Note: disease / fictional_disease
+        +disease_glossary : list[str]
+        Note: fictional disease names; None = standard mode
+        +explicit_real_disease_exclusion : bool
         +use_ollama : bool
-        +wandb_project : str
+        +fedavg_min_examples : int
         +lora_config() LoRAConfig
     }
 
     %% ── Label Space ──────────────────────────────────────────────────────────
-    class LabelMap {
-        <<utility>>
-        CANONICAL_ICD_CODES : 8 codes
-        Note: 3 infectious (J11.1 / U07.2 / A41.9)
-        Note: 5 non-infectious (M54.5 / R51 / F41.1 / Z87.39 / R53.83)
-        24 classes = 8 ICD × 3 management tiers
-        build_label_map(icd_codes)
-        icd_match_score(pred, true) float
-        MANAGEMENT_TIERS = home rest / treat / hospitalise
+    class DISEASE_LABELS {
+        <<fl/learner.py constant>>
+        non-infectious / influenza / pneumonia / unknown
+        Note: 4 standard disease classes
+        severity: discharge / mild / moderate / severe / critical
+        Note: fictional_disease maps influenza→velarex, pneumonia→sornathis
     }
 
     class LoRAConfig {
@@ -356,59 +433,29 @@ classDiagram
         +target_modules : list[str]
         Note: q_lin, v_lin
         +num_labels : int
-        Note: 24 (overridden dynamically)
-    }
-
-    %% ── FL Client ────────────────────────────────────────────────────────────
-    class WorldFLClient {
-        +world : WorldEngine
-        +lora_config : LoRAConfig
-        +sim_days : int
-        +local_epochs : int
-        +replay_buffer_size : int
-        +_replay_buffer : list
-        Note: accumulates events across rounds
-        +_local_replay_buffer : list
-        Note: shadow model's own buffer
-        +_label2id : dict
-        +_id2label : dict
-        +run_simulation_round() list
-        +train_on_events(events) tuple
-        Note: extends buffer then trains on full buffer
-        +train_local_on_events(events)
-        +evaluate(events) dict
-        Note: triage_acc, diag_acc, danger_rate, fl_gain
-        +run_round() dict
-        +get_weights() list[ndarray]
-        +set_weights(weights)
-        +release_model()
-        Note: called after each round to free VRAM
-        Note: peak VRAM = 1 model regardless of N silos
-        +try_accept_global(global_weights, threshold) bool
     }
 
     %% ── Centralized Baseline ─────────────────────────────────────────────────
     class CentralizedTrainer {
-        +silos : list[WorldFLClient]
-        Note: worlds used for data only
-        +local_epochs : int
+        +silos : list[WorldEngine]
+        Note: bare worlds; models managed by trainer
+        +sim_days : int
         +_pool_buffer : list
         Note: all events from all silos pooled
         +run_round() CentralizedRoundMetrics
-        Note: advance all worlds → pool → train one model
         +get_weights() list[ndarray]
         +release_model()
     }
 
-    class CentralizedRoundMetrics {
-        +round_num : int
-        +loss : float
-        +triage_acc : float
-        +diag_acc : float
-        +danger_rate : float
-        +num_events : int
-        +trained_on : int
-        +all_done : bool
+    %% ── Factory Helpers (fl/train.py module level) ───────────────────────────
+    class FactoryHelpers {
+        <<fl/train.py>>
+        _build_sim_world_config(silo_idx, wc, cfg, rng) SimWorldConfig
+        Note: flat WorldConfig → simulation.world_config.WorldConfig
+        _build_fl_silo(silo_idx, wc, cfg, rng, dataset) FLSilo
+        Note: FLSilo = world + doctor + nurse + end_condition
+        _build_bare_world(silo_idx, wc, cfg, rng) WorldEngine
+        Note: no learners; for static/centralized modes
     }
 
     %% ── Aggregation ──────────────────────────────────────────────────────────
@@ -418,37 +465,28 @@ classDiagram
         Note: weighted mean of LoRA adapter arrays
     }
 
-    %% ── MIMIC Layer ──────────────────────────────────────────────────────────
-    class MimicDatabase {
-        <<abstract>>
-        +cohort_ids(diagnosis_group) list[int]
-        +get_record(subject_id) MimicRecord
-        +random_subject(diagnosis_group, rng) MimicRecord
-    }
-    class MockMimicDatabase {
-        150 synthetic ICU patients
-        groups: sepsis / pneumonia / heart_failure
+    %% ── Prototype / Stereotype Libraries ────────────────────────────────────
+    class PrototypeLibrary {
+        +silo_id : int
+        +add_from_events(events, enc_model, tokenizer, round_num) int
+        +size() int
+        +merge(global_protos)
     }
 
-    MimicDatabase <|-- MockMimicDatabase
+    class StereotypeLibrary {
+        +update_from_events(events, enc_model, tokenizer)
+        +get_state() dict
+        +set_global(global_state)
+    }
+
+    FLSilo ..> PrototypeLibrary : used by OllamaDiagnosticClient
+    FLSilo ..> StereotypeLibrary : federated via train.py
 
     %% ── Flower / W&B ─────────────────────────────────────────────────────────
     class WandBFedAvg {
         +wandb_run : Run
         +aggregate_fit(round, results, failures)
     }
-
-    %% ── Relationships ────────────────────────────────────────────────────────
-    WorldFLClient --> WorldEngine
-    WorldFLClient --> LoRAConfig
-    CentralizedTrainer "1" o-- "N" WorldFLClient
-    CentralizedTrainer --> CentralizedRoundMetrics
-    FLTrainConfig --> LoRAConfig
-    FLTrainConfig "1" o-- "N" WorldConfig
-    FLTrainConfig ..> EndCondition : builds via from_config()
-    WorldEngine --> EndCondition
-    WorldFLClient ..> LabelMap
-    CentralizedTrainer ..> LabelMap
 ```
 
 ---
@@ -457,12 +495,14 @@ classDiagram
 
 | Pattern | Where used |
 |---|---|
+| **Strategy** | `DataSource` ABC — swap TemplateDataSource / PhraseLibraryDataSource / OllamaDataSource / MIMICDataSource at config time |
 | **Strategy** | `DiseaseStrategy`, `DiseaseProgressionStrategy` — swap disease behaviour at runtime |
+| **Composition** | `WorldConfig(agents: AgentConfig, epidemic: EpidemicConfig)` — agents compose world, not implement it |
 | **Template Method** | `DiseaseProgressionStrategy.sample_trajectory()` → `_sample()` helper |
 | **Observer** | `SIRModel.step(agents)` — recomputes S/I/R from agent states each day |
 | **Factory** | `end_conditions.from_config(name, param)` — builds EndCondition from string |
+| **Factory** | `_build_fl_silo()`, `_build_bare_world()` — module-level helpers in `fl/train.py` replace per-function `_make_world()` closures |
 | **Adapter** | `MimicDiseaseTrajectory` — adapts `MimicRecord` to `DiseaseTrajectory` interface |
 | **Decorator** | `WandBFedAvg` — extends `FedAvg` with W&B callbacks |
-| **Null Object** | `step_tick()` no-op when `is_done=True` |
-| **Object Pool** | `release_model()` + lazy rebuild — VRAM scheduling; peak = 1 model at a time |
+| **Object Pool** | `FLSilo.release_model()` + lazy rebuild — VRAM scheduling; peak = 1 model at a time |
 | **Registry** | `PROGRESSION_STRATEGIES`, `NON_INFECTIOUS_COMPLAINTS` — lookup by name |
