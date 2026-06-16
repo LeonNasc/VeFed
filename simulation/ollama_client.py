@@ -17,24 +17,25 @@ Raises OllamaUnavailableError if the doctor model is unreachable.
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 import urllib.error
 from simulation.models import DiagnosticAction, DiagnosticEvent
 
 OLLAMA_URL  = "http://localhost:11434/api/chat"
 MODEL       = "phi3:mini"
-TIMEOUT_SEC = 60
+TIMEOUT_SEC = 180
 MAX_TURNS   = 6   # safety cap — prevents loops if model keeps asking questions
 
 NURSE_SYSTEM_PROMPT = """\
 You are a triage nurse. Assess the severity of the patient's condition. Each reply is ONE JSON object — no other text.
 
-First ask the patient one follow-up question about their symptoms, then request their vitals.
+Ask the patient 1 to 3 follow-up questions before requesting vitals. Ask fewer questions when the presentation is already clear (e.g. obvious severe symptoms); ask more when the presentation is mild or ambiguous. Do not ask redundant questions.
 
 To ask a question:
 {"type": "question", "text": "your question here"}
 
-To request vitals (after the patient has answered):
+To request vitals (after you have enough information):
 {"type": "vitals_request"}
 
 To give your triage assessment (only after seeing vitals):
@@ -78,11 +79,15 @@ class TriageNurseClient:
     """
 
     def __init__(self, model: str = MODEL, url: str = OLLAMA_URL,
-                 timeout: int = TIMEOUT_SEC, patient_llm=None):
-        self.model        = model
-        self.url          = url
-        self.timeout      = timeout
-        self._patient_llm = patient_llm
+                 timeout: int = TIMEOUT_SEC, patient_llm=None,
+                 disease_glossary: "list[str] | None" = None,
+                 explicit_exclusion: bool = False):
+        self.model              = model
+        self.url                = url
+        self.timeout            = timeout
+        self._patient_llm       = patient_llm
+        self._disease_glossary  = disease_glossary
+        self._explicit_exclusion = explicit_exclusion
 
     def triage(self, event: DiagnosticEvent, _queue=None,
                _format_vitals=None, _patient_answer=None) -> str:
@@ -98,7 +103,15 @@ class TriageNurseClient:
             if _queue:
                 _queue.update_status(event.agent_id, msg)
 
-        messages     = [{"role": "system", "content": NURSE_SYSTEM_PROMPT}]
+        if self._disease_glossary is not None:
+            from simulation.fictional_diseases import make_nurse_system_prompt
+            _nurse_prompt = make_nurse_system_prompt(
+                self._disease_glossary,
+                explicit_exclusion=self._explicit_exclusion,
+            )
+        else:
+            _nurse_prompt = NURSE_SYSTEM_PROMPT
+        messages     = [{"role": "system", "content": _nurse_prompt}]
         opening      = next(
             (t["text"] for t in event.conversation if t["role"] == "patient"),
             "I am not feeling well.",
@@ -151,7 +164,7 @@ class TriageNurseClient:
         event.nurse_severity = severity
         return severity
 
-    def _call_ollama(self, messages):
+    def _call_ollama(self, messages, _max_retries: int = 20):
         payload = json.dumps({
             "model": self.model, "messages": messages,
             "stream": False, "format": "json",
@@ -161,13 +174,23 @@ class TriageNurseClient:
             self.url, data=payload,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read()).get("message", {}).get("content", "")
-        except urllib.error.URLError as exc:
-            raise OllamaUnavailableError(f"Cannot reach Ollama at {self.url}: {exc.reason}") from exc
-        except Exception as exc:
-            raise OllamaUnavailableError(f"Ollama request failed: {exc}") from exc
+        last_exc: Exception | None = None
+        for attempt in range(_max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read()).get("message", {}).get("content", "")
+            except (urllib.error.URLError, ConnectionResetError, BrokenPipeError,
+                    TimeoutError, OSError) as exc:
+                last_exc = exc
+                wait = min(15 * (2 ** min(attempt, 3)), 120)
+                print(f"  [ollama/nurse] connection error (attempt {attempt+1}/{_max_retries}), "
+                      f"retrying in {wait}s: {exc}", flush=True)
+                time.sleep(wait)
+            except Exception as exc:
+                raise OllamaUnavailableError(f"Ollama request failed: {exc}") from exc
+        raise OllamaUnavailableError(
+            f"Ollama unreachable after {_max_retries} attempts: {last_exc}"
+        ) from last_exc
 
     def _parse_response(self, raw: str) -> dict:
         try:
@@ -200,20 +223,40 @@ class OllamaDiagnosticClient:
     """
 
     def __init__(self, model: str = MODEL, url: str = OLLAMA_URL,
-                 timeout: int = TIMEOUT_SEC, patient_llm=None):
-        self.model             = model
-        self.url               = url
-        self.timeout           = timeout
-        self._patient_llm      = patient_llm
-        self._examples:        list[dict] = []
-        self._proto_library    = None   # PrototypeLibrary | None
-        self._proto_encoder    = None   # (model, tokenizer) for embedding queries
-        self._proto_k:         int = 3  # prototypes retrieved per query
-        self._global_stereos:  dict    = {}   # {label: centroid} from StereotypeLibrary
-        self._n_stereo_silos:  int     = 0
+                 timeout: int = TIMEOUT_SEC, patient_llm=None,
+                 disease_glossary: "list[str] | None" = None,
+                 explicit_exclusion: bool = False):
+        """
+        disease_glossary : list[str] | None
+            If provided, overrides the default disease label set in prompts.
+            Pass a list of fictional disease names (e.g. ["velarex", "sornathis"])
+            to use the fictional disease experiment prompts from
+            simulation.fictional_diseases. When None, uses the standard
+            influenza/pneumonia prompts.
+
+        explicit_exclusion : bool
+            When True (requires disease_glossary to be set), injects a hard
+            disclaimer into all LLM prompts explicitly telling the model that
+            influenza, pneumonia, and all real-world diseases do not exist in
+            this world.  Ablation against the fictional-disease approach.
+        """
+        self.model               = model
+        self.url                 = url
+        self.timeout             = timeout
+        self._patient_llm        = patient_llm
+        self._examples:          list[dict] = []
+        self._proto_library      = None   # PrototypeLibrary | None
+        self._proto_encoder      = None   # (model, tokenizer) for embedding queries
+        self._proto_k:           int = 3  # prototypes retrieved per query
+        self._global_stereos:    dict    = {}   # {label: centroid} from StereotypeLibrary
+        self._n_stereo_silos:    int     = 0
+        self._disease_glossary:  "list[str] | None" = disease_glossary
+        self._explicit_exclusion: bool              = explicit_exclusion
         # Triage nurse — shares Ollama server; runs before doctor in the pipeline
-        self._nurse = TriageNurseClient(model=model, url=url,
-                                        timeout=timeout, patient_llm=patient_llm)
+        self._nurse = TriageNurseClient(model=model, url=url, timeout=timeout,
+                                        patient_llm=patient_llm,
+                                        disease_glossary=disease_glossary,
+                                        explicit_exclusion=explicit_exclusion)
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -279,7 +322,12 @@ class OllamaDiagnosticClient:
                     parsed = self._force_diagnosis(messages)
 
                 disease = (parsed.get("disease") or "unknown").lower()
-                if disease not in ("influenza", "pneumonia", "non-infectious", "unknown"):
+                _valid_diseases = (
+                    set(self._disease_glossary) | {"non-infectious", "unknown"}
+                    if self._disease_glossary
+                    else {"influenza", "pneumonia", "non-infectious", "unknown"}
+                )
+                if disease not in _valid_diseases:
                     disease = "unknown"
                 event.doctor_disease = disease
                 event.diagnosis      = (parsed.get("notes") or "")[:100]
@@ -385,9 +433,21 @@ class OllamaDiagnosticClient:
 
         if self._patient_llm is not None:
             try:
+                # In fictional mode, use the disease-specific patient system prompt
+                # so the patient describes only the fictional disease's symptoms.
+                fictional_sys = None
+                gt_disease = getattr(event, "gt_disease", None)
+                if (self._disease_glossary and gt_disease
+                        and gt_disease in self._disease_glossary):
+                    from simulation.fictional_diseases import make_patient_system_prompt
+                    fictional_sys = make_patient_system_prompt(
+                        gt_disease,
+                        explicit_exclusion=self._explicit_exclusion,
+                    )
                 return self._patient_llm.followup_answer(
                     question, event.severity, personality,
                     case_table=event.case_table, day=event.days_infected,
+                    system_prompt=fictional_sys,
                 )
             except Exception:
                 pass
@@ -432,7 +492,15 @@ class OllamaDiagnosticClient:
         Includes: system prompt, RAG injections, full nurse conversation so far,
         and the nurse's triage summary as context.
         """
-        messages = [{"role": "system", "content": DOCTOR_SYSTEM_PROMPT}]
+        if self._disease_glossary is not None:
+            from simulation.fictional_diseases import make_doctor_system_prompt
+            system_prompt = make_doctor_system_prompt(
+                self._disease_glossary,
+                explicit_exclusion=self._explicit_exclusion,
+            )
+        else:
+            system_prompt = DOCTOR_SYSTEM_PROMPT
+        messages = [{"role": "system", "content": system_prompt}]
 
         # Shared query embedding for prototype + stereotype retrieval
         opening = next(
@@ -586,7 +654,7 @@ class OllamaDiagnosticClient:
                                      "content": json.dumps({"type": "question", "text": text})})
         return messages
 
-    def _call_ollama(self, messages: list[dict]) -> str:
+    def _call_ollama(self, messages: list[dict], _max_retries: int = 20) -> str:
         payload = json.dumps({
             "model":    self.model,
             "messages": messages,
@@ -601,16 +669,26 @@ class OllamaDiagnosticClient:
             headers = {"Content-Type": "application/json"},
             method  = "POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read())
-                return body.get("message", {}).get("content", "")
-        except urllib.error.URLError as exc:
-            raise OllamaUnavailableError(
-                f"Cannot reach Ollama at {self.url}: {exc.reason}"
-            ) from exc
-        except Exception as exc:
-            raise OllamaUnavailableError(f"Ollama request failed: {exc}") from exc
+        last_exc: Exception | None = None
+        for attempt in range(_max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    body = json.loads(resp.read())
+                    return body.get("message", {}).get("content", "")
+            except (urllib.error.URLError, ConnectionResetError, BrokenPipeError,
+                    TimeoutError, OSError) as exc:
+                last_exc = exc
+                # Exponential backoff starting at 15s, capped at 120s.
+                # Ollama needs ~30-60s to reload a model after an OOM crash.
+                wait = min(15 * (2 ** min(attempt, 3)), 120)
+                print(f"  [ollama] connection error (attempt {attempt+1}/{_max_retries}), "
+                      f"retrying in {wait}s: {exc}", flush=True)
+                time.sleep(wait)
+            except Exception as exc:
+                raise OllamaUnavailableError(f"Ollama request failed: {exc}") from exc
+        raise OllamaUnavailableError(
+            f"Ollama unreachable after {_max_retries} attempts: {last_exc}"
+        ) from last_exc
 
     def _parse_response(self, raw: str) -> dict:
         try:

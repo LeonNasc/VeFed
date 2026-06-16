@@ -28,8 +28,15 @@ from fl.lora import LoRAConfig, build_model, get_lora_weights, set_lora_weights
 # Nurse: severity-only classifier (5 classes)
 SEVERITY_LABELS: list[str] = ["discharge", "mild", "moderate", "severe", "critical"]
 
-# Doctor: disease-only classifier (4 classes; "unknown" is the disease-discovery hook)
-DISEASE_LABELS: list[str] = ["non-infectious", "influenza", "pneumonia", "unknown"]
+# Doctor: disease-only classifier. "non-infectious" = genuine worried-well visits;
+# common_cold/gastroenteritis/uti/migraine = real but mild non-epidemic background
+# illnesses (see simulation/complaints.py:OTHER_DISEASE_COMPLAINTS); "unknown" is
+# the disease-discovery hook.
+DISEASE_LABELS: list[str] = [
+    "non-infectious", "influenza", "pneumonia",
+    "common_cold", "gastroenteritis", "uti", "migraine",
+    "unknown",
+]
 
 # Legacy combined space kept for backward compatibility with existing datasets / checkpoints
 DIAGNOSTIC_LABELS: list[str] = [
@@ -39,6 +46,26 @@ DIAGNOSTIC_LABELS: list[str] = [
     "pneumonia/mild",
     "pneumonia/moderate",
     "pneumonia/severe",
+    "non-infectious",
+]
+
+# Fictional disease label spaces — used when disease_glossary is set in FLTrainConfig
+FICTIONAL_DISEASE_LABELS: list[str] = [
+    "non-infectious", "velarex", "sornathis", "unknown",
+]
+
+# 5-class variant adds "morven" once it has been positively identified
+FICTIONAL_DISEASE_5_LABELS: list[str] = [
+    "non-infectious", "velarex", "sornathis", "unknown", "morven",
+]
+
+FICTIONAL_DIAGNOSTIC_LABELS: list[str] = [
+    "velarex/mild",
+    "velarex/moderate",
+    "velarex/severe",
+    "sornathis/mild",
+    "sornathis/moderate",
+    "sornathis/severe",
     "non-infectious",
 ]
 
@@ -52,6 +79,27 @@ def build_severity_map() -> tuple[dict[str, int], dict[int, str]]:
 def build_disease_map() -> tuple[dict[str, int], dict[int, str]]:
     label2id = {lbl: i for i, lbl in enumerate(DISEASE_LABELS)}
     id2label  = {i: lbl for i, lbl in enumerate(DISEASE_LABELS)}
+    return label2id, id2label
+
+
+def build_fictional_disease_map() -> tuple[dict[str, int], dict[int, str]]:
+    """Disease-only map for fictional disease FL experiments."""
+    label2id = {lbl: i for i, lbl in enumerate(FICTIONAL_DISEASE_LABELS)}
+    id2label  = {i: lbl for i, lbl in enumerate(FICTIONAL_DISEASE_LABELS)}
+    return label2id, id2label
+
+
+def build_fictional_disease_5_map() -> tuple[dict[str, int], dict[int, str]]:
+    """5-class map: adds 'morven' slot for the attribution phase experiment."""
+    label2id = {lbl: i for i, lbl in enumerate(FICTIONAL_DISEASE_5_LABELS)}
+    id2label  = {i: lbl for i, lbl in enumerate(FICTIONAL_DISEASE_5_LABELS)}
+    return label2id, id2label
+
+
+def build_fictional_label_map() -> tuple[dict[str, int], dict[int, str]]:
+    """Combined (disease/severity) map for fictional disease static training."""
+    label2id = {lbl: i for i, lbl in enumerate(FICTIONAL_DIAGNOSTIC_LABELS)}
+    id2label  = {i: lbl for i, lbl in enumerate(FICTIONAL_DIAGNOSTIC_LABELS)}
     return label2id, id2label
 
 
@@ -82,18 +130,24 @@ def _normalize_item(item) -> dict:
     """
     Return a uniform dict representation whether item is a DiagnosticEvent
     or a dict record loaded from SiloDataset.
+
+    Text field: concatenate all patient turns (not just the last one).
+    Multi-turn conversations produce richer embeddings; single-turn events
+    (old behaviour or background visits) are unchanged because they only
+    have one patient turn.
     """
     if isinstance(item, dict):
         return item
     patient_turns = [t["text"] for t in item.conversation if t["role"] == "patient"]
+    text = " ".join(patient_turns) if patient_turns else ""
     return {
-        "text":          patient_turns[-1] if patient_turns else "",
+        "text":          text,
         "label":         item.ground_truth or "",
         "gt_disease":    getattr(item, "gt_disease",  None) or "",
         "gt_severity":   getattr(item, "gt_severity", None) or "",
         "is_background": bool(getattr(item, "is_background", False)),
         "action":        item.action.name if item.action is not None else None,
-        "num_turns":     item.num_turns or 0,
+        "num_turns":     len(patient_turns),
         "severity":      item.severity or 0.0,
         "days_infected": int(getattr(item, "days_infected", 0) or 0),
     }
@@ -138,6 +192,10 @@ class FLLearner:
             label2id, id2label = build_severity_map()
         elif label_space == "disease":
             label2id, id2label = build_disease_map()
+        elif label_space == "fictional_disease":
+            label2id, id2label = build_fictional_disease_map()
+        elif label_space == "fictional_disease_5":
+            label2id, id2label = build_fictional_disease_5_map()
         else:
             label2id, id2label = build_label_map()
 
@@ -318,6 +376,77 @@ class FLLearner:
             self._extend_buffer(self._replay_buffer, events)
             self._last_train_sample = list(self._replay_buffer)
             return self._train_model(self.model, self._replay_buffer)
+
+    def init_attribution_class(self, source_idx: int, target_idx: int) -> None:
+        """
+        Copy source class head weights to target slot (warm-start for attribution).
+
+        Call before train_head_only() at the attribution round so the new class
+        starts from the position of the existing catch-all class rather than from
+        random init. This eliminates the cold-start disadvantage for the new class.
+        """
+        import torch
+        model = self.model
+        with torch.no_grad():
+            model.classifier.weight.data[target_idx] = (
+                model.classifier.weight.data[source_idx].clone()
+            )
+            if model.classifier.bias is not None:
+                model.classifier.bias.data[target_idx] = (
+                    model.classifier.bias.data[source_idx].clone()
+                )
+
+    def train_head_only(self, events: list) -> tuple[int, list[float]]:
+        """
+        Train only the classification head; freeze backbone + LoRA adapters.
+
+        Used in Phase 2 (attribution): the embedding is already correct
+        (the backbone learned the disease representation during Phase 1).
+        Only the linear head needs updating to split the "unknown" catch-all
+        into a named class.
+        """
+        model = self.model
+        # Save original requires_grad so we can restore exactly — don't blindly
+        # unfreeze everything (PEFT keeps base model weights frozen via requires_grad=False
+        # and get_lora_weights filters by requires_grad, so accidentally thawing base
+        # weights causes FedAvg shape mismatches across silos).
+        saved_grad = {name: p.requires_grad for name, p in model.named_parameters()}
+        for name, param in model.named_parameters():
+            param.requires_grad = "classifier" in name
+
+        try:
+            result = self._train_model(model, events)
+        finally:
+            for name, param in model.named_parameters():
+                param.requires_grad = saved_grad[name]
+
+        return result
+
+    def extract_embeddings(self, events: list) -> tuple[np.ndarray, list[str]]:
+        """
+        Extract [CLS] embeddings for events using the current backbone.
+        Returns (embeddings [N, H], label_strings [N]).
+        Only events with a known label and non-empty text are included.
+        """
+        import torch
+
+        texts, label_ids = self._build_dataset(events)
+        if not texts:
+            return np.zeros((0, 768)), []
+
+        model = self.model
+        dev   = self._model_device(model)
+        enc   = self._tokenizer(
+            texts, padding=True, truncation=True, max_length=128, return_tensors="pt"
+        )
+        enc = {k: v.to(dev) for k, v in enc.items()}
+
+        model.eval()
+        with torch.no_grad():
+            out = model(**enc, output_hidden_states=True)
+        cls_emb = out.hidden_states[-1][:, 0, :].cpu().numpy()   # [N, H]
+        labels  = [self._id2label[i] for i in label_ids]
+        return cls_emb, labels
 
     def train_local(self, events: list, round_num: int = 0) -> None:
         """

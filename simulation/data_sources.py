@@ -1,14 +1,19 @@
 """
-DataSource — abstract interface for patient opening-statement generation.
+DataSource — abstract interface for patient complaint generation.
 
 Each concrete class encapsulates one observation modality:
-  TemplateDataSource    — SymptomNarrator template phrases (fast, no LLM)
+  TemplateDataSource      — SymptomNarrator template phrases (fast, no LLM)
   PhraseLibraryDataSource — curated phrase banks from phrase_sampler.py
-  OllamaDataSource      — live local LLM via PatientLLMClient
+  OllamaDataSource        — live local LLM via PatientLLMClient
+  MIMICDataSource         — MIMIC vital-sign patterns → complaint text
 
-All share the same method signature so WorldEngine._generate_opening can
-treat them uniformly.  Confusion logic (atypical presentation text) lives
-inside each class, not in the caller.
+Two methods:
+  opening_statement() — single-turn monologue (backward-compatible)
+  full_conversation() — multi-turn patient–nurse exchange via state machine
+
+WorldEngine calls full_conversation() when AgentConfig.multi_turn=True
+(default True after the state-machine refactor). Training data then uses
+the concatenated patient turns instead of the opening statement alone.
 """
 from __future__ import annotations
 
@@ -20,12 +25,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from simulation.models import InnerState
     from simulation.symptom_language import Personality
+    from simulation.conversation import ConversationRecord
 
 
 # ── Abstract base ─────────────────────────────────────────────────────────────
 
 class DataSource(ABC):
-    """Generates a natural-language opening complaint for an infectious visit."""
+    """Generates patient complaint text for an infectious clinic visit."""
 
     @abstractmethod
     def opening_statement(
@@ -34,6 +40,24 @@ class DataSource(ABC):
         days: int,
         personality: "Personality",
     ) -> str: ...
+
+    def full_conversation(
+        self,
+        inner_state: "InnerState",
+        days: int,
+        personality: "Personality",
+    ) -> "ConversationRecord":
+        """
+        Multi-turn patient–nurse exchange via the conversation state machine.
+
+        Default implementation: wraps opening_statement() in a ConversationRecord
+        with no nurse probes.  Concrete subclasses override to add probes.
+        """
+        from simulation.conversation import ConversationRecord, ConversationTurn
+        opener = self.opening_statement(inner_state, days, personality)
+        rec = ConversationRecord(personality_key=personality.value.lower())
+        rec.turns.append(ConversationTurn("patient", opener))
+        return rec
 
 
 # ── Concrete implementations ──────────────────────────────────────────────────
@@ -64,6 +88,16 @@ class TemplateDataSource(DataSource):
                 state = dataclasses.replace(
                     inner_state, disease_name=self._rng.choice(candidates))
         return self._narrator.full_opening_statement(state, days, personality)
+
+    def full_conversation(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> "ConversationRecord":
+        from simulation.conversation import simulate_conversation
+        opener        = self.opening_statement(inner_state, days, personality)
+        probe_banks   = _probe_banks_for(getattr(inner_state, "disease_name", ""))
+        return simulate_conversation(
+            opener, inner_state, days, personality,
+            self._rng, probe_banks, self._narrator,
+        )
 
 
 class PhraseLibraryDataSource(DataSource):
@@ -98,6 +132,16 @@ class PhraseLibraryDataSource(DataSource):
         result   = self._lib.sample(disease, severity, personality.value, days=days)
         return result["text"]
 
+    def full_conversation(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> "ConversationRecord":
+        from simulation.conversation import simulate_conversation
+        opener      = self.opening_statement(inner_state, days, personality)
+        probe_banks = _probe_banks_for(getattr(inner_state, "disease_name", ""))
+        return simulate_conversation(
+            opener, inner_state, days, personality,
+            self._rng, probe_banks,
+        )
+
 
 class OllamaDataSource(DataSource):
     """
@@ -121,6 +165,23 @@ class OllamaDataSource(DataSource):
             except Exception:
                 pass
         return self._fallback.opening_statement(inner_state, days, personality)
+
+
+def _probe_banks_for(disease_name: str) -> dict | None:
+    """
+    Return the probe-response banks for a disease, or None if unavailable.
+
+    Checks fictional_diseases.py first (velarex / sornathis / morven), then
+    returns None for real-disease names (template fallback handles those).
+    """
+    try:
+        from simulation.fictional_diseases import FICTIONAL_DISEASES
+        d = FICTIONAL_DISEASES.get(disease_name)
+        if d:
+            return d.get("probe_responses")
+    except ImportError:
+        pass
+    return None
 
 
 def make_mimic_data_source(

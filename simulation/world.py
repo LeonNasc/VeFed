@@ -540,8 +540,8 @@ class WorldEngine:
                 ev = self._make_static_infectious_event(k, personality)
             else:
                 ev = self._make_static_background_event(k, personality, BACKGROUND_COMPLAINTS)
-            opening = self._generate_opening_for_event(ev, personality)
-            ev.conversation.insert(0, {"role": "patient", "text": opening})
+            turns = self._generate_full_conversation_for_event(ev, personality)
+            ev.conversation[:0] = turns   # prepend all turns
             diag_fn = getattr(self, "_diagnostic_fn", _default_diagnostic)
             ev = diag_fn(ev)
             events.append(ev)
@@ -676,10 +676,8 @@ class WorldEngine:
         for c in cases:
             ag = self.agents_by_id.get(c.agent_id)
             if ag:
-                c.conversation.append({
-                    'role':  'patient',
-                    'text':  self._generate_opening(ag, event=c),
-                })
+                turns = self._generate_conversation(ag, event=c)
+                c.conversation.extend(turns)
             q = self._hosp_queue_map.get(
                 ag.home_hospital_id if ag else "", self.clinic_queue
             )
@@ -689,10 +687,8 @@ class WorldEngine:
         for c in self._collect_background_cases():
             ag = self.agents_by_id.get(c.agent_id)
             if ag:
-                c.conversation.append({
-                    'role':  'patient',
-                    'text':  self._generate_opening(ag, event=c),
-                })
+                turns = self._generate_conversation(ag, event=c)
+                c.conversation.extend(turns)
             q = self._hosp_queue_map.get(
                 ag.home_hospital_id if ag else "", self.clinic_queue
             )
@@ -730,6 +726,36 @@ class WorldEngine:
             disease_name  = event.gt_disease or "influenza",
         )
         return self._config.agents.data_source.opening_statement(inner, event.days_infected, personality)
+
+    def _generate_full_conversation_for_event(
+        self, event: DiagnosticEvent, personality: Personality
+    ) -> list[dict]:
+        """
+        Run the multi-turn state machine for a static-mode event.
+        Returns conversation turns as [{"role": str, "text": str}].
+        Background visits get a single patient turn only (no nurse probes).
+        """
+        from simulation.symptom_language import background_opening
+        if event.is_background:
+            opener = background_opening(personality, self._rng)
+            return [{"role": "patient", "text": opener}]
+
+        from simulation.models import InnerState
+        inner = InnerState(
+            severity      = event.severity,
+            symptoms      = event.symptoms,
+            days_infected = event.days_infected,
+            trend         = "stable",
+            fatigue       = 5.0,
+            pain          = 4.0,
+            mood          = 0.5,
+            top_vital     = None,
+            disease_name  = event.gt_disease or "influenza",
+        )
+        rec = self._config.agents.data_source.full_conversation(
+            inner, event.days_infected, personality
+        )
+        return [{"role": t.role, "text": t.text} for t in rec.turns]
 
     def _collect_background_cases(self) -> list[DiagnosticEvent]:
         """
@@ -769,13 +795,31 @@ class WorldEngine:
         return cases
 
     def _generate_opening(self, agent, event: DiagnosticEvent | None = None) -> str:
-        """Opening patient complaint for the SIR clinic queue."""
+        """Single-turn opening complaint (kept for backward compatibility)."""
         from simulation.symptom_language import background_opening
         if event is not None and event.complaint_context:
             return background_opening(agent.personality, self._rng)
         return self._config.agents.data_source.opening_statement(
             agent.inner_state, agent.health_state.days_infected, agent.personality
         )
+
+    def _generate_conversation(
+        self, agent, event: DiagnosticEvent | None = None
+    ) -> list[dict]:
+        """
+        Multi-turn patient–nurse exchange for a live SIR agent clinic visit.
+        Background / complaint-context visits get a single patient turn.
+        Infectious visits run the full conversation state machine.
+        """
+        from simulation.symptom_language import background_opening
+        if event is not None and event.complaint_context:
+            opener = background_opening(agent.personality, self._rng)
+            return [{"role": "patient", "text": opener}]
+
+        rec = self._config.agents.data_source.full_conversation(
+            agent.inner_state, agent.health_state.days_infected, agent.personality
+        )
+        return [{"role": t.role, "text": t.text} for t in rec.turns]
 
     def _process_clinic_queue(self) -> None:
         """
