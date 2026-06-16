@@ -257,16 +257,68 @@ First R ≥ 0.80: **14.0 ± 1.4**  ·  First R ≥ 0.90: **13.5 ± 1.5**
 
 ## 5. Exposed-Silo Sweep
 
-*Run `python run_exposed_sweep.py` to generate data for this section.*
+*How many silos need to encounter Morven for the federation to detect it?*
 
-Planned conditions: n_exposed ∈ {1, 2, 3, 5} silos × seeds {42, 43, 44}
+In the 3-silo experiment, 1 of 3 silos (33%) saw Morven — relatively high exposure. Scaling
+to 10 silos with only silo_0 exposed drops this to 10%, a 3× dilution of the novel signal in
+FedAvg. This sweep isolates the exposure-fraction effect by varying k ∈ {1, 2, 3, 5} silos
+(10%–50%) while holding all other parameters fixed (10 silos, β=2.0, Gaussian schedule, R10 injection).
 
-| n exposed | fraction | seeds done |
-|---|---|---|
-| 1 | 10% | — |
-| 2 | 20% | — |
-| 3 | 30% ≈ 1/3 (3-silo ref) | — |
-| 5 | 50% | — |
+**k=3** (30%) is the closest analogue to the 3-silo experiment (1/3 ≈ 33%).
+
+### Summary plot
+
+![Exposed-silo sweep](exposed_sweep_summary.png)
+
+### Summary table
+
+| k (exposed silos) | Fraction | First detect R | Sil @ R15 | Known acc @ R20 | Seeds |
+|---|---|---|---|---|---|
+| 3-silo ref (k=1) | 33% | 10 *(n=1)* | 0.867 *(n=1)* | 1.000 *(n=1)* | [42] |
+| 1 | 10% | 12.0 | 0.544 ± 0.125 | 1.000 | [42, 43, 44] |
+| 2 | 20% | 12.3 ± 2.1 | 0.400 ± 0.083 | 1.000 | [42, 43, 44] |
+| 3 | 30% ← 3-silo equiv. | 10.7 ± 0.9 | 0.436 ± 0.234 | 1.000 | [42, 43, 44] |
+| 5 | 50% | 8.3 ± 2.4 | 0.755 ± 0.111 | 1.000 | [42, 43, 44] |
+
+### Per-seed detail
+
+**n_exposed = 1 (10%)**
+
+| | First detect R | Sil @ R15 | Sil @ R20 | Known acc |
+|---|---|---|---|---|
+| seed 42 | 12 | 0.382 | 0.461 | 1.000 |
+| seed 43 | 12 | 0.685 | 0.595 | 1.000 |
+| seed 44 | 12 | 0.565 | 0.848 | 1.000 |
+
+---
+
+**n_exposed = 2 (20%)**
+
+| | First detect R | Sil @ R15 | Sil @ R20 | Known acc |
+|---|---|---|---|---|
+| seed 42 | 15 | 0.401 | 0.836 | 1.000 |
+| seed 43 | 12 | 0.298 | 0.716 | 1.000 |
+| seed 44 | 10 | 0.501 | 0.561 | 1.000 |
+
+---
+
+**n_exposed = 3 (30%)**
+
+| | First detect R | Sil @ R15 | Sil @ R20 | Known acc |
+|---|---|---|---|---|
+| seed 42 | 10 | 0.511 | 0.679 | 1.000 |
+| seed 43 | 12 | 0.119 | 0.890 | 1.000 |
+| seed 44 | 10 | 0.678 | 0.837 | 1.000 |
+
+---
+
+**n_exposed = 5 (50%)**
+
+| | First detect R | Sil @ R15 | Sil @ R20 | Known acc |
+|---|---|---|---|---|
+| seed 42 | 5 | 0.860 | 0.923 | 1.000 |
+| seed 43 | 10 | 0.602 | 0.887 | 1.000 |
+| seed 44 | 10 | 0.804 | 0.852 | 1.000 |
 
 ---
 

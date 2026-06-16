@@ -145,6 +145,53 @@ _GROUP_PARAMS: dict[str, dict] = {
             "SpO2": 1.3, "fatigue": 1.5,
         },
     },
+    # ── MIMIC cohort groups used by MIMICDataSource ───────────────────────────
+    # Vital amplifier values calibrated to published literature patterns.
+    "influenza": {
+        "peak_severity_mean":  0.48, "peak_severity_sd": 0.10,
+        "onset_days_mean":     2.0,  "onset_days_sd":    0.8,
+        "recovery_days_mean":  7.0,  "recovery_days_sd": 2.0,
+        "los_mean":            7.0,  "los_sd":           2.0,
+        # Influenza: fever-dominant, achiness, mild tachycardia; SpO2 stays normal
+        "amplifiers": {
+            "HR": 1.4, "temp": 1.8, "WBC": 1.2, "CRP": 1.3,
+            "fatigue": 1.3, "pain": 1.4,
+            "SpO2": 0.3,  # SpO2 drop minimal for uncomplicated influenza
+            "RR":   0.5,
+        },
+    },
+    "bacterial_pneumonia": {
+        "peak_severity_mean":  0.62, "peak_severity_sd": 0.10,
+        "onset_days_mean":     3.0,  "onset_days_sd":    1.0,
+        "recovery_days_mean": 10.0,  "recovery_days_sd": 2.5,
+        "los_mean":           11.0,  "los_sd":           3.0,
+        # Pneumonia: SpO2↓↓, RR↑↑, moderate fever; responds well to antibiotics
+        "amplifiers": {
+            "SpO2": 2.0, "RR": 2.2, "temp": 1.3, "WBC": 1.8,
+            "CRP": 2.0, "HR": 1.2,
+        },
+    },
+    "covid": {
+        # COVID-19 (novel disease / Morven analog):
+        # "Silent hypoxia" — SpO2 drops sharply, often before severe dyspnoea is felt.
+        # Extreme fatigue disproportionate to other symptoms (long-COVID precursor).
+        # Variable fever (often low-grade or absent early).
+        # GI symptoms in a subset (nausea). Mild leukopenia (WBC normal or low).
+        "peak_severity_mean":  0.65, "peak_severity_sd": 0.12,
+        "onset_days_mean":     4.0,  "onset_days_sd":    1.5,
+        "recovery_days_mean": 14.0,  "recovery_days_sd": 5.0,
+        "los_mean":           14.0,  "los_sd":           5.0,
+        "amplifiers": {
+            "SpO2":   2.5,   # dominant marker — silent desaturation
+            "fatigue": 3.0,  # extreme fatigue, disproportionate
+            "HR":     1.3,   # secondary tachycardia
+            "temp":   0.7,   # variable/low-grade fever
+            "RR":     1.4,   # delayed respiratory compromise
+            "WBC":    0.6,   # mild leukopenia (viral — unlike bacterial)
+            "CRP":    1.8,   # elevated inflammatory marker
+            "nausea": 1.6,   # GI involvement in subset
+        },
+    },
 }
 
 _VARIABLES = [
@@ -355,3 +402,117 @@ def _severity_at_day(day: float, peak: float, onset: float, recovery: float) -> 
         decay_rate = -math.log(0.02) / max(recovery, 1.0)
         s = peak * math.exp(-decay_rate * (day - onset))
     return max(0.0, min(1.0, s))
+
+
+# ─── Real MIMIC-IV CSV loader ─────────────────────────────────────────────────
+
+class RealMimicDatabase(MimicDatabase):
+    """
+    Loads patient records from preprocessed MIMIC-IV CSV exports.
+
+    Expects a single wide-format CSV (one row per patient-day) at csv_path.
+    Generate it from raw MIMIC-IV with scripts/preprocess_mimic.py (see that
+    file for the SQL extraction queries and itemid list).
+
+    Expected CSV columns:
+        subject_id, hadm_id, day, diagnosis_group,
+        HR, temp, RR, SpO2, BP_sys, BP_dia, WBC, CRP, lactate,
+        pain, fatigue, nausea, severity_proxy
+
+    diagnosis_group must be one of: influenza, bacterial_pneumonia, covid,
+    sepsis, pneumonia, heart_failure.
+
+    MIMIC-IV raw tables needed (if building the preprocessed CSV from scratch):
+        admissions.csv.gz         — subject_id, hadm_id
+        diagnoses_icd.csv.gz      — hadm_id, icd_code, icd_version
+        chartevents.csv.gz        — hadm_id, itemid, charttime, valuenum
+
+    ICD-10 cohort filters applied by the preprocessing script:
+        influenza:           J09.x, J10.x, J11.x
+        bacterial_pneumonia: J13.x, J14.x, J15.x, J18.x
+        covid:               U07.1
+
+    MIMIC-IV chartevents itemids used:
+        220045 → HR      (bpm)
+        223761 → temp    (°F; converted to °C by (F-32)×5/9)
+        220210 → RR      (breaths/min)
+        220277 → SpO2    (%)
+        220179 → BP_sys  (mmHg)
+        220180 → BP_dia  (mmHg)
+
+    MIMIC-III compatibility note: itemids differ (211→HR, 678→temp, etc.).
+    The preprocessing script handles both versions.
+
+    Note on COVID data: standard MIMIC-IV covers admissions through 2019.
+    COVID patients (ICD U07.1) appear in MIMIC-IV v2.0+ (2020–2022 data).
+    If COVID data is unavailable, MockMimicDatabase generates synthetic COVID
+    vitals calibrated to published literature.
+    """
+
+    def __init__(self, csv_path: str | "Path", max_patients: Optional[int] = None):
+        from pathlib import Path
+        import csv as _csv
+
+        self._records: dict[int, MimicRecord] = {}
+        path = Path(csv_path)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"RealMimicDatabase: preprocessed CSV not found at {path}\n"
+                "Run scripts/preprocess_mimic.py against your MIMIC-IV download first."
+            )
+
+        # Group rows by (subject_id, hadm_id)
+        _rows: dict[tuple, list[dict]] = {}
+        opener = _csv.DictReader
+        if str(path).endswith(".gz"):
+            import gzip, io
+            raw = gzip.open(path, "rt", encoding="utf-8")
+        else:
+            raw = open(path, newline="", encoding="utf-8")
+
+        with raw as f:
+            for row in opener(f):
+                key = (int(row["subject_id"]), int(row["hadm_id"]))
+                _rows.setdefault(key, []).append(row)
+                if max_patients and len(_rows) >= max_patients:
+                    break
+
+        for (sid, hid), rows in _rows.items():
+            rows.sort(key=lambda r: int(r["day"]))
+            group = rows[0]["diagnosis_group"]
+            los   = len(rows)
+
+            severity_series: list[float] = []
+            chartevents: dict[int, dict[str, float]] = {}
+            for row in rows:
+                day = int(row["day"])
+                sev = float(row.get("severity_proxy", 0.0))
+                severity_series.append(round(sev, 3))
+                vitals: dict[str, float] = {}
+                for var in _VARIABLES:
+                    val_str = row.get(var, "")
+                    if val_str and val_str not in ("", "NA", "nan"):
+                        raw_val = float(val_str)
+                        if var == "temp":
+                            raw_val = (raw_val - 32.0) * 5.0 / 9.0  # °F → °C
+                        vitals[var] = round(raw_val, 1)
+                chartevents[day] = vitals
+
+            self._records[sid] = MimicRecord(
+                subject_id      = sid,
+                hadm_id         = hid,
+                diagnosis_group = group,
+                chartevents     = chartevents,
+                severity_series = severity_series,
+            )
+
+    def cohort_ids(self, diagnosis_group: Optional[str] = None) -> list[int]:
+        if diagnosis_group is None:
+            return list(self._records.keys())
+        return [sid for sid, r in self._records.items()
+                if r.diagnosis_group == diagnosis_group]
+
+    def get_record(self, subject_id: int) -> MimicRecord:
+        if subject_id not in self._records:
+            raise KeyError(f"subject_id {subject_id} not in RealMimicDatabase")
+        return self._records[subject_id]

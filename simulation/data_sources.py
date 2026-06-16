@@ -121,3 +121,28 @@ class OllamaDataSource(DataSource):
             except Exception:
                 pass
         return self._fallback.opening_statement(inner_state, days, personality)
+
+
+def make_mimic_data_source(
+    csv_path: str | None = None,
+    seed: int = 42,
+    n_mock_patients: int = 100,
+) -> "DataSource":
+    """
+    Factory for MIMICDataSource.
+
+    csv_path=None  → MockMimicDatabase (no files needed; synthetic vitals)
+    csv_path=<path> → RealMimicDatabase loaded from preprocessed CSV
+
+    The preprocessed CSV is generated from raw MIMIC-IV by
+    scripts/preprocess_mimic.py.  See RealMimicDatabase docstring for the
+    expected schema and ICD cohort filters.
+    """
+    from simulation.mimic_db import MockMimicDatabase, RealMimicDatabase
+    from simulation.mimic_data_source import MIMICDataSource
+
+    if csv_path is None:
+        db = MockMimicDatabase(n_patients_per_group=n_mock_patients // 6, seed=seed)
+    else:
+        db = RealMimicDatabase(csv_path)
+    return MIMICDataSource(db, seed=seed)

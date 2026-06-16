@@ -96,6 +96,20 @@ def run_one(n_exposed: int, seed: int, device: str) -> dict:
         summary["n_silos"]         = N_SILOS
         summary["seed"]            = seed
         summary["elapsed_s"]       = round(elapsed, 1)
+
+        # Derive scalar fields from silhouette_curve for easy table display
+        curve = summary.get("silhouette_curve", [])
+        inj_r = summary.get("injection_round", INJECTION_ROUND)
+        sil_r15 = next((e["silhouette"] for e in curve if e["round"] == 15), None)
+        detect_r = next(
+            (e["round"] for e in curve
+             if e["round"] > inj_r and e["silhouette"] > 0.3),
+            None,
+        )
+        if sil_r15 is not None:
+            summary["silhouette_at_r15"] = round(sil_r15, 4)
+        summary["detection_round"] = detect_r
+
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
         print(f"\n  Done in {elapsed:.0f}s")
