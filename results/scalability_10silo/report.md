@@ -13,9 +13,10 @@
 2. [Convergence — IID](#2-convergence--iid)
 3. [Convergence — Non-IID](#3-convergence--non-iid)
 4. [Unknown Disease Detection](#4-unknown-disease-detection--federated-vs-local)
-5. [Prototype Bank](#5-prototype-bank-classification--10-silo)
-6. [Scalability Analysis](#6-scalability-analysis)
-7. [Summary Tables](#7-summary-tables)
+5. [Exposed-Silo Sweep](#5-exposed-silo-sweep)
+6. [Prototype Bank](#6-prototype-bank-classification--10-silo)
+7. [Scalability Analysis](#7-scalability-analysis)
+8. [Summary Tables](#8-summary-tables)
 
 ---
 
@@ -254,7 +255,22 @@ First R ≥ 0.80: **14.0 ± 1.4**  ·  First R ≥ 0.90: **13.5 ± 1.5**
 
 ---
 
-## 5. Prototype Bank Classification — 10-Silo
+## 5. Exposed-Silo Sweep
+
+*Run `python run_exposed_sweep.py` to generate data for this section.*
+
+Planned conditions: n_exposed ∈ {1, 2, 3, 5} silos × seeds {42, 43, 44}
+
+| n exposed | fraction | seeds done |
+|---|---|---|
+| 1 | 10% | — |
+| 2 | 20% | — |
+| 3 | 30% ≈ 1/3 (3-silo ref) | — |
+| 5 | 50% | — |
+
+---
+
+## 6. Prototype Bank Classification — 10-Silo
 
 *Seeds: [42, 43, 44]. Morven injected into silo_0 at R10.*
 
@@ -294,7 +310,7 @@ First R ≥ 0.80: **14.0 ± 1.4**  ·  First R ≥ 0.90: **13.5 ± 1.5**
 
 ---
 
-## 6. Scalability Analysis
+## 7. Scalability Analysis
 
 ### CS1 — Convergence quality at 10 silos
 
@@ -351,7 +367,7 @@ providing more representative prototypes.
 
 ---
 
-## 7. Summary Tables
+## 8. Summary Tables
 
 ### SIR diagnostic accuracy
 

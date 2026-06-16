@@ -30,9 +30,12 @@ REF3_IID_ROOT   = Path("results/fast_ablation/template/gaussian/iid")
 REF3_NONIID_ROOT = Path("results/fast_ablation/template/gaussian/noniid")
 REF3_SEEDS      = [42, 43, 44]
 
-PROTO_ROOT  = Path("results/prototype/10silo")
-OUT_DIR     = Path("results/scalability_10silo")
-REPORT_PATH = OUT_DIR / "report.md"
+PROTO_ROOT   = Path("results/prototype/10silo")
+OUT_DIR      = Path("results/scalability_10silo")
+SWEEP_DIR    = OUT_DIR / "exposed_sweep"
+REPORT_PATH  = OUT_DIR / "report.md"
+SWEEP_N_EXPOSED = [1, 2, 3, 5]
+SWEEP_SEEDS     = [42, 43, 44]
 
 # Hardcoded single-seed SIR baselines (from fast_ablation §7-8, sir-cal-2x)
 _BASELINE_3S = {
@@ -584,7 +587,221 @@ def generate_all_plots(iid_10, noniid_10, unk_10, proto) -> dict:
     if unk_10:
         plots["sil_seeds"] = plot_silhouette_per_seed(unk_10, "unknown_10silo")
 
+    sweep = extract_sweep_stats()
+    if sweep:
+        plots["sweep"] = plot_exposed_sweep(sweep)
+
     return plots
+
+
+# ── Exposed-silo sweep ─────────────────────────────────────────────────────────
+
+def extract_sweep_stats() -> dict | None:
+    """Load results from exposed_sweep/n{k}/seed{s}/. Returns None if no data."""
+    sweep = {}
+    any_found = False
+    for k in SWEEP_N_EXPOSED:
+        per_seed = {}
+        for s in SWEEP_SEEDS:
+            sil_path = SWEEP_DIR / f"n{k}" / f"seed{s}" / "silhouette.json"
+            rm_path  = SWEEP_DIR / f"n{k}" / f"seed{s}" / "round_metrics.json"
+            if not (sil_path.exists() and rm_path.exists()):
+                continue
+            any_found = True
+            sl = json.loads(sil_path.read_text())
+            rm = json.loads(rm_path.read_text())
+            sil_map = {d["round"]: d["silhouette"] for d in sl}
+            diag    = [r["agg_diag_acc"] for r in rm
+                       if r.get("agg_diag_acc") is not None and r["agg_diag_acc"] <= 1.0]
+            detect_r = next((r for r in sorted(sil_map) if sil_map[r] > 0.3), None)
+            per_seed[s] = {
+                "sil_map":  sil_map,
+                "sil15":    sil_map.get(15),
+                "sil20":    sil_map.get(20),
+                "detect_r": detect_r,
+                "final_acc": diag[-1] if diag else None,
+            }
+        sweep[k] = per_seed
+    return sweep if any_found else None
+
+
+def plot_exposed_sweep(sweep: dict) -> str:
+    """Detection round and silhouette@R15 vs n_exposed_silos."""
+    _plot_style()
+    import matplotlib.pyplot as plt
+
+    ks = sorted(sweep)
+    fracs = [k / 10 for k in ks]
+
+    detect_means, detect_stds = [], []
+    sil15_means,  sil15_stds  = [], []
+    acc_means,    acc_stds    = [], []
+
+    for k in ks:
+        per_seed = sweep[k]
+        drs  = [v["detect_r"]  for v in per_seed.values() if v["detect_r"]  is not None]
+        s15s = [v["sil15"]     for v in per_seed.values() if v["sil15"]     is not None]
+        accs = [v["final_acc"] for v in per_seed.values() if v["final_acc"] is not None]
+
+        detect_means.append(np.mean(drs)  if drs  else None)
+        detect_stds.append(np.std(drs)   if len(drs)  > 1 else 0)
+        sil15_means.append(np.mean(s15s) if s15s else None)
+        sil15_stds.append(np.std(s15s)  if len(s15s) > 1 else 0)
+        acc_means.append(np.mean(accs)  if accs else None)
+        acc_stds.append(np.std(accs)   if len(accs) > 1 else 0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), constrained_layout=True)
+    fig.patch.set_facecolor("white")
+    for ax in axes:
+        ax.set_facecolor("#f8f9fa")
+        for sp in ax.spines.values():
+            sp.set_color("#ced4da"); sp.set_linewidth(0.5)
+        ax.set_xlabel("Fraction of silos exposed to Morven")
+        ax.set_xticks(fracs)
+        ax.set_xticklabels([f"{f:.0%}\n(k={k})" for f, k in zip(fracs, ks)], fontsize=8)
+
+    C = "#e63946"
+    ax_det, ax_sil, ax_acc = axes
+
+    # Detection round
+    valid = [(f, m, e) for f, m, e in zip(fracs, detect_means, detect_stds) if m is not None]
+    if valid:
+        xs, ms, es = zip(*valid)
+        ax_det.errorbar(xs, ms, yerr=es, color=C, linewidth=2, marker="o",
+                        markersize=6, capsize=4, zorder=4)
+    ax_det.set_ylabel("First detection round (sil > 0.3)")
+    ax_det.set_title("Detection speed vs exposure fraction", fontsize=10)
+    ax_det.invert_yaxis()   # earlier = better
+
+    # Silhouette @R15
+    valid = [(f, m, e) for f, m, e in zip(fracs, sil15_means, sil15_stds) if m is not None]
+    if valid:
+        xs, ms, es = zip(*valid)
+        ax_sil.errorbar(xs, ms, yerr=es, color=C, linewidth=2, marker="o",
+                        markersize=6, capsize=4, zorder=4)
+    ax_sil.axhline(0.3, color="#6c757d", linewidth=0.8, linestyle="--",
+                   label="detection threshold")
+    ax_sil.set_ylabel("Morven silhouette @ R15")
+    ax_sil.set_title("Cluster separability @ R15 vs exposure", fontsize=10)
+    ax_sil.set_ylim(-0.05, 1.05)
+    ax_sil.legend(fontsize=8)
+
+    # Known-disease accuracy
+    valid = [(f, m, e) for f, m, e in zip(fracs, acc_means, acc_stds) if m is not None]
+    if valid:
+        xs, ms, es = zip(*valid)
+        ax_acc.errorbar(xs, ms, yerr=es, color=C, linewidth=2, marker="o",
+                        markersize=6, capsize=4, zorder=4)
+    ax_acc.set_ylabel("Known-disease accuracy @ R20")
+    ax_acc.set_title("Velarex+Sornathis accuracy vs exposure", fontsize=10)
+    ax_acc.set_ylim(-0.05, 1.05)
+
+    fig.suptitle(
+        "Exposed-silo sweep — 10 silos, Morven injected at R10\n"
+        "How detection degrades as fewer silos encounter the novel disease (mean ± 1 std, seeds 42–44)",
+        fontsize=10, color="#212529",
+    )
+    out = OUT_DIR / "exposed_sweep_summary.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out}")
+    return "exposed_sweep_summary.png"
+
+
+def sec_exposed_sweep(sweep: dict | None) -> str:
+    if not sweep:
+        return """\
+## 5. Exposed-Silo Sweep
+
+*Run `python run_exposed_sweep.py` to generate data for this section.*
+
+Planned conditions: n_exposed ∈ {1, 2, 3, 5} silos × seeds {42, 43, 44}
+
+| n exposed | fraction | seeds done |
+|---|---|---|
+| 1 | 10% | — |
+| 2 | 20% | — |
+| 3 | 30% ≈ 1/3 (3-silo ref) | — |
+| 5 | 50% | — |
+
+---
+"""
+
+    ks = sorted(sweep)
+
+    # Build per-condition rows
+    rows = []
+    for k in ks:
+        per_seed = sweep[k]
+        seeds_done = sorted(per_seed)
+        drs  = [v["detect_r"]  for v in per_seed.values() if v["detect_r"]  is not None]
+        s15s = [v["sil15"]     for v in per_seed.values() if v["sil15"]     is not None]
+        accs = [v["final_acc"] for v in per_seed.values() if v["final_acc"] is not None]
+
+        def _ms(vals):
+            if not vals: return "—"
+            m = float(np.mean(vals))
+            s = float(np.std(vals)) if len(vals) > 1 else None
+            return f"{m:.1f} ± {s:.1f}" if s else f"{m:.1f}"
+
+        def _mf(vals):
+            if not vals: return "—"
+            m = float(np.mean(vals))
+            s = float(np.std(vals)) if len(vals) > 1 else None
+            return f"{m:.3f} ± {s:.3f}" if s else f"{m:.3f}"
+
+        note = " ← 3-silo equiv." if k == 3 else ""
+        rows.append(
+            f"| {k} | {k/10:.0%}{note} | {_ms(drs)} | {_mf(s15s)} | {_mf(accs)} | {seeds_done} |"
+        )
+
+    # Per-seed silhouette tables
+    sil_tables = []
+    for k in ks:
+        per_seed = sweep[k]
+        seed_rows = []
+        for s, v in sorted(per_seed.items()):
+            dr  = v["detect_r"]  if v["detect_r"]  is not None else "—"
+            s15 = f"{v['sil15']:.3f}" if v["sil15"] is not None else "—"
+            s20 = f"{v['sil20']:.3f}" if v["sil20"] is not None else "—"
+            acc = f"{v['final_acc']:.3f}" if v["final_acc"] is not None else "—"
+            seed_rows.append(f"| seed {s} | {dr} | {s15} | {s20} | {acc} |")
+        sil_tables.append(
+            f"**n_exposed = {k} ({k/10:.0%})**\n\n"
+            "| | First detect R | Sil @ R15 | Sil @ R20 | Known acc |\n"
+            "|---|---|---|---|---|\n"
+            + "\n".join(seed_rows)
+        )
+
+    return f"""\
+## 5. Exposed-Silo Sweep
+
+*How many silos need to encounter Morven for the federation to detect it?*
+
+In the 3-silo experiment, 1 of 3 silos (33%) saw Morven — relatively high exposure. Scaling
+to 10 silos with only silo_0 exposed drops this to 10%, a 3× dilution of the novel signal in
+FedAvg. This sweep isolates the exposure-fraction effect by varying k ∈ {{1, 2, 3, 5}} silos
+(10%–50%) while holding all other parameters fixed (10 silos, β=2.0, Gaussian schedule, R10 injection).
+
+**k=3** (30%) is the closest analogue to the 3-silo experiment (1/3 ≈ 33%).
+
+### Summary plot
+
+![Exposed-silo sweep](exposed_sweep_summary.png)
+
+### Summary table
+
+| k (exposed silos) | Fraction | First detect R | Sil @ R15 | Known acc @ R20 | Seeds |
+|---|---|---|---|---|---|
+| 3-silo ref (k=1) | 33% | 10 *(n=1)* | 0.867 *(n=1)* | 1.000 *(n=1)* | [42] |
+{chr(10).join(rows)}
+
+### Per-seed detail
+
+{(chr(10) + chr(10) + "---" + chr(10) + chr(10)).join(sil_tables)}
+
+---
+"""
 
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────
@@ -892,7 +1109,7 @@ def sec_unknown(fed: dict | None, local: dict | None) -> str:
 
 def sec_prototype(s: dict | None) -> str:
     if not s:
-        return ("## 5. Prototype Bank Classification — 10-Silo\n\n"
+        return ("## 6. Prototype Bank Classification — 10-Silo\n\n"
                 "*(runs queued)*\n\n---\n")
     note = _n_note(s["n"])
 
@@ -912,7 +1129,7 @@ def sec_prototype(s: dict | None) -> str:
     per_seed_table = "\n".join(per_seed_rows)
 
     return f"""\
-## 5. Prototype Bank Classification — 10-Silo
+## 6. Prototype Bank Classification — 10-Silo
 
 *Seeds: {s["seeds"]}. Morven injected into silo_0 at R10.*
 
@@ -971,7 +1188,7 @@ def sec_scalability(iid_10, noniid_10, ref3_iid, ref3_noniid, unk_10, proto) -> 
     proto_detect = _f(proto["detect_mean"], proto["detect_std"], 1) if proto else "—"
 
     return f"""\
-## 6. Scalability Analysis
+## 7. Scalability Analysis
 
 ### CS1 — Convergence quality at 10 silos
 
@@ -1052,7 +1269,7 @@ def sec_tables(iid_10, noniid_10, ref3_iid, ref3_noniid, unk_10, unk_10l, proto)
     ref3_noniid_row = _sir_row("3-silo (Gaussian ref, n=3)", ref3_noniid)
 
     return f"""\
-## 7. Summary Tables
+## 8. Summary Tables
 
 ### SIR diagnostic accuracy
 
@@ -1123,6 +1340,7 @@ def main() -> None:
     proto      = extract_proto_stats()
     ref3_iid   = extract_ref3_stats(REF3_IID_ROOT)
     ref3_noniid = extract_ref3_stats(REF3_NONIID_ROOT)
+    sweep       = extract_sweep_stats()
 
     if not args.no_plots:
         generate_all_plots(iid_10, noniid_10, unk_10, proto)
@@ -1140,14 +1358,16 @@ def main() -> None:
          "2. [Convergence — IID](#2-convergence--iid)\n"
          "3. [Convergence — Non-IID](#3-convergence--non-iid)\n"
          "4. [Unknown Disease Detection](#4-unknown-disease-detection--federated-vs-local)\n"
-         "5. [Prototype Bank](#5-prototype-bank-classification--10-silo)\n"
-         "6. [Scalability Analysis](#6-scalability-analysis)\n"
-         "7. [Summary Tables](#7-summary-tables)\n"),
+         "5. [Exposed-Silo Sweep](#5-exposed-silo-sweep)\n"
+         "6. [Prototype Bank](#6-prototype-bank-classification--10-silo)\n"
+         "7. [Scalability Analysis](#7-scalability-analysis)\n"
+         "8. [Summary Tables](#8-summary-tables)\n"),
         "---\n",
         sec_setup(),
         sec_iid(iid_10, ref3_iid),
         sec_noniid(noniid_10, ref3_noniid),
         sec_unknown(unk_10, unk_10l),
+        sec_exposed_sweep(sweep),
         sec_prototype(proto),
         sec_scalability(iid_10, noniid_10, ref3_iid, ref3_noniid, unk_10, proto),
         sec_tables(iid_10, noniid_10, ref3_iid, ref3_noniid, unk_10, unk_10l, proto),
