@@ -313,7 +313,7 @@ class TUI:
 
         # FL rounds
         fl_y = p.h - 2
-        fl_msg = f"FL rounds: {self.world.fl_round}"
+        fl_msg = f"FL rounds: {getattr(self.world, 'fl_round', 0)}"
         p.safe_addstr(fl_y, 1, fl_msg, curses.color_pair(C_MAGENTA))
         p.refresh()
 
@@ -476,7 +476,7 @@ class TUI:
 
     def _draw_log(self) -> None:
         p   = self.p_log
-        log = self.world.event_log + self.world.fl_log
+        log = self.world.event_log + getattr(self.world, 'fl_log', [])
         p.clear_draw()
 
         visible_rows = p.h - 2

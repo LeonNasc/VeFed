@@ -8,6 +8,7 @@ Federated Simulated World — launcher
 import argparse
 import curses
 from simulation.world import WorldEngine
+from simulation.world_config import WorldConfig, AgentConfig
 from simulation.ollama_client import OllamaDiagnosticClient, OllamaUnavailableError
 from simulation.interaction_log import InteractionLogger
 from ui.tui import TUI
@@ -30,7 +31,8 @@ def _setup_colors() -> None:
 
 
 def _build_world(seed: int = 42, num_agents: int = 30):
-    world  = WorldEngine(num_agents=num_agents, seed=seed)
+    config = WorldConfig(agents=AgentConfig(num_agents=num_agents))
+    world  = WorldEngine(config, seed=seed)
     logger = InteractionLogger()
     world.attach_interaction_logger(logger)
     print(f"Interaction log → {logger.path}")
