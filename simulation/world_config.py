@@ -12,6 +12,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from simulation.data_sources import DataSource
+    from simulation.case_summary import CaseSummarizer
 
 
 @dataclass
@@ -30,6 +31,7 @@ class AgentConfig:
     data_source:           "DataSource" = field(
         default_factory=lambda: _default_data_source())
     background_visit_rate: float        = 0.025
+    case_summarizer:       Optional["CaseSummarizer"] = None
 
 
 @dataclass

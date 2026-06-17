@@ -945,6 +945,307 @@ def plot_logit_scatter(
     return path
 
 
+# ── SIR-driven variant ────────────────────────────────────────────────────────
+
+def _build_sir_world(progressions: list[str], n_agents: int,
+                     seed: int, n_initial_seeds: int = 2,
+                     beta_scale: float = 2.0,
+                     use_ollama: bool = False,
+                     case_summarizer=None):
+    """Return a WorldEngine configured for fictional diseases."""
+    from simulation.world import WorldEngine
+    from simulation.world_config import WorldConfig, AgentConfig, EpidemicConfig
+    if use_ollama:
+        from simulation.data_sources import OllamaFictionalDataSource
+        data_source = OllamaFictionalDataSource(seed=seed)
+    else:
+        from simulation.data_sources import FictionalDataSource
+        data_source = FictionalDataSource(seed=seed)
+
+    cfg = WorldConfig(
+        agents   = AgentConfig(
+            num_agents      = n_agents,
+            data_source     = data_source,
+            case_summarizer = case_summarizer,
+        ),
+        epidemic = EpidemicConfig(
+            progressions    = progressions,
+            disease_strategy= progressions[0],
+            initial_seeds   = n_initial_seeds,
+            beta_scale      = beta_scale,
+        ),
+        seed_offset = 0,
+    )
+    return WorldEngine(cfg, seed=seed)
+
+
+def _event_to_record(event, label: str | None = None) -> dict:
+    """Convert a DiagnosticEvent from WorldEngine to the dict format used in FL."""
+    case_summary = getattr(event, "case_summary", None)
+    if case_summary:
+        text = case_summary
+    else:
+        turns = [t["text"] for t in event.conversation if t["role"] == "patient"]
+        text  = " ".join(turns) if turns else ""
+    return {
+        "text":         text,
+        "label":        label if label is not None else (event.gt_disease or "unknown"),
+        "gt_disease":   event.gt_disease or "unknown",
+        "case_summary": case_summary or "",
+    }
+
+
+def run_sir_unknown_disease(cfg: "UnknownDiseaseConfig",
+                            days_per_round: int = 3,
+                            n_agents: int = 60,
+                            beta_scale: float = 2.0,
+                            use_ollama: bool = False,
+                            case_summarizer=None) -> dict:
+    """
+    Unknown disease detection experiment driven by live SIR dynamics.
+
+    Each FL round advances all WorldEngines by `days_per_round` days.
+    Known-disease worlds (Velarex + Sornathis) run for all rounds.
+    Morven worlds run in parallel from round 1 but only contribute events
+    from `cfg.injection_round` onward (simulating undetected spread before
+    the first clinical alert).
+
+    Holdout evaluation still uses phrase-bank records for a stable benchmark.
+    """
+    from fl.lora import LoRAConfig
+    from fl.learner import FLLearner
+    from fl.train import _fedavg
+
+    t_start = time.time()
+    rng     = random.Random(cfg.seed)
+
+    # ── Static holdout for evaluation (phrase-bank, unchanged) ───────────────
+    _, holdouts = _build_pools(
+        cfg.n_silos, cfg.events_per_silo, cfg.holdout_frac, cfg.seed,
+    )
+
+    # ── WorldEngines — one known-disease world + one morven world per silo ───
+    known_worlds = [
+        _build_sir_world(
+            ["Velarex", "Sornathis"], n_agents,
+            seed=cfg.seed + i * 1000,
+            n_initial_seeds=3,
+            beta_scale=beta_scale,
+            use_ollama=use_ollama,
+            case_summarizer=case_summarizer,
+        )
+        for i in range(cfg.n_silos)
+    ]
+    morven_worlds = [
+        _build_sir_world(
+            ["Morven"], max(n_agents // 3, 10),
+            seed=cfg.seed + i * 1000 + 77777,
+            n_initial_seeds=1,
+            beta_scale=beta_scale,
+            use_ollama=use_ollama,
+            case_summarizer=case_summarizer,
+        )
+        for i in range(cfg.n_silos)
+    ] if cfg.do_inject else []
+
+    # ── Learners ──────────────────────────────────────────────────────────────
+    lora_cfg = LoRAConfig(
+        model_name_or_path = "distilbert-base-uncased",
+        num_labels         = None,
+        rank               = cfg.lora_rank,
+        lora_alpha         = cfg.lora_alpha,
+        lora_dropout       = cfg.lora_dropout,
+    )
+    learners = [
+        FLLearner(
+            lora_config         = lora_cfg,
+            label_space         = cfg.label_space,
+            min_events_to_train = cfg.min_events_to_train,
+            local_epochs        = cfg.local_epochs,
+            batch_size          = cfg.batch_size,
+            lr                  = cfg.lr,
+            train_sample_cap    = cfg.train_sample_cap,
+            device              = cfg.training_device,
+        )
+        for _ in range(cfg.n_silos)
+    ]
+
+    # ── Fixed probe events (phrase-bank — same as non-SIR mode) ──────────────
+    probe_events = generate_fictional_probe_events(cfg.probe_per_band, cfg.probe_seed)
+    probe_labels = [ev.ground_truth for ev in probe_events]
+
+    run_name = cfg.run_name or f"sir_unk_{cfg.schedule}_{int(time.time())}"
+    out_dir  = Path(cfg.results_dir) / run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total_seen = [0] * cfg.n_silos
+    global_w: list | None = None
+
+    round_metrics:       list[dict]          = []
+    silhouette_curve:    list[dict]          = []
+    embedding_snapshots: dict[int, dict]     = {}
+
+    summarizer_tag = (
+        type(case_summarizer).__name__ if case_summarizer is not None else "none"
+    )
+    print(f"\n{'═'*60}")
+    print(f"  Unknown Disease Experiment (SIR) — {cfg.n_silos} silos")
+    print(f"  rounds={cfg.n_rounds}  days_per_round={days_per_round}  n_agents={n_agents}")
+    print(f"  inject={'YES (round '+str(cfg.injection_round)+')' if cfg.do_inject else 'NO'}")
+    print(f"  case_summarizer={summarizer_tag}")
+    print(f"{'═'*60}\n")
+
+    for r in range(cfg.n_rounds):
+        rnd = r + 1
+
+        # ── Advance all worlds ────────────────────────────────────────────────
+        new_this_round: list[list[dict]] = []
+        for i in range(cfg.n_silos):
+            known_events = known_worlds[i].run_sim_days(days_per_round)
+            records      = [
+                _event_to_record(ev)
+                for ev in known_events
+                if not getattr(ev, "is_background", False)
+            ]
+
+            inject_this_silo = (
+                cfg.do_inject
+                and rnd >= cfg.injection_round
+                and i < cfg.n_exposed_silos
+                and morven_worlds
+            )
+            if inject_this_silo:
+                morven_events = morven_worlds[i].run_sim_days(days_per_round)
+                morven_recs   = [
+                    _event_to_record(ev, label="unknown")
+                    for ev in morven_events
+                    if not getattr(ev, "is_background", False)
+                ]
+                records = records + morven_recs
+            elif morven_worlds and i < cfg.n_exposed_silos:
+                # Advance morven world even before injection (silent spread)
+                morven_worlds[i].run_sim_days(days_per_round)
+
+            total_seen[i] += len(records)
+            new_this_round.append(records)
+
+        # ── Per-silo train → collect weights ──────────────────────────────────
+        eval_metrics:  list[dict]  = []
+        round_weights: list[list]  = []
+        train_sizes:   list[int]   = []
+        losses:        list[float] = []
+
+        for i, learner in enumerate(learners):
+            if global_w is not None and not cfg.local_only:
+                learner.set_weights(global_w)
+
+            m = learner.evaluate(holdouts[i]) if holdouts[i] else {}
+            eval_metrics.append(m)
+
+            new_ev = new_this_round[i]
+            if total_seen[i] >= cfg.min_events_to_train and new_ev:
+                n_trained, epoch_losses = learner.train(new_ev)
+                train_sizes.append(n_trained)
+                losses.append(float(np.mean(epoch_losses)) if epoch_losses else float("nan"))
+            else:
+                train_sizes.append(0)
+                losses.append(float("nan"))
+
+            round_weights.append(learner.get_weights())
+            learner.release()
+
+        # ── FedAvg ────────────────────────────────────────────────────────────
+        if not cfg.local_only:
+            active_idx = [
+                i for i, s in enumerate(train_sizes)
+                if s > 0 and s >= cfg.fedavg_min_examples
+            ]
+            if active_idx:
+                wts      = [round_weights[i] for i in active_idx]
+                sizes    = [train_sizes[i]   for i in active_idx]
+                global_w = _fedavg(wts, sizes)
+
+        # ── Embedding snapshots ───────────────────────────────────────────────
+        if rnd in cfg.snap_rounds and global_w is not None:
+            learners[-1].set_weights(global_w)
+            cls, logits = _extract_embeddings(learners[-1], probe_events)
+            embedding_snapshots[rnd] = {"cls": cls, "logits": logits}
+            coords_2d = _project_umap(logits, seed=cfg.seed)
+            sil       = _silhouette_morven(coords_2d, probe_labels)
+            silhouette_curve.append({"round": rnd, "silhouette": sil})
+            sil_msg = f"  morven_sil={sil:.3f}" if not np.isnan(sil) else ""
+            print(f"    [embed] round {rnd} snapshotted{sil_msg}")
+            learners[-1].release()
+
+        # ── Metrics ───────────────────────────────────────────────────────────
+        agg_diag  = float(np.mean([m.get("diag_acc",   float("nan")) for m in eval_metrics]))
+        _finite = [l for l in losses if l == l]  # filter nan
+        loss_str  = f"{float(np.mean(_finite)):.3f}" if _finite else "n/a"
+        n_known   = sum(len(new_this_round[i]) for i in range(cfg.n_silos))
+        sil_now   = silhouette_curve[-1]["silhouette"] if silhouette_curve and rnd in cfg.snap_rounds else float("nan")
+        sil_str   = f"  sil={sil_now:.3f}" if not np.isnan(sil_now) else ""
+        print(
+            f"  R{rnd:02d}  diag={agg_diag:.3f}  loss={loss_str}"
+            f"  events={n_known}"
+            + sil_str
+            + (f"  [morven active]" if cfg.do_inject and rnd >= cfg.injection_round else "")
+        )
+
+        round_metrics.append({
+            "round":           rnd,
+            "agg_diag_acc":    agg_diag,
+            "mean_loss":       float(np.mean(_finite)) if _finite else float("nan"),
+            "train_sizes":     train_sizes,
+            "n_events":        n_known,
+            "morven_injected": cfg.do_inject and rnd >= cfg.injection_round,
+        })
+
+    # ── Final eval ────────────────────────────────────────────────────────────
+    final_diag_list = []
+    for i, learner in enumerate(learners):
+        if global_w is not None:
+            learner.set_weights(global_w)
+        m = learner.evaluate(holdouts[i]) if holdouts[i] else {}
+        learner.release()
+        final_diag_list.append(m.get("diag_acc", float("nan")))
+
+    final_diag = float(np.nanmean(final_diag_list))
+    elapsed    = time.time() - t_start
+    print(f"\n  Final holdout diag={final_diag:.3f}  wall={elapsed:.0f}s")
+
+    # ── Save outputs ──────────────────────────────────────────────────────────
+    with (out_dir / "round_metrics.json").open("w") as f:
+        json.dump(round_metrics, f, indent=2)
+    with (out_dir / "silhouette.json").open("w") as f:
+        json.dump(silhouette_curve, f, indent=2)
+    for rnd, snap in embedding_snapshots.items():
+        np.savez_compressed(
+            out_dir / f"logits_r{rnd:02d}.npz",
+            logits=snap["logits"], cls=snap["cls"],
+        )
+
+    summary = {
+        "mode":            "sir",
+        "days_per_round":  days_per_round,
+        "n_agents":        n_agents,
+        "n_silos":         cfg.n_silos,
+        "n_rounds":        cfg.n_rounds,
+        "injection_round": cfg.injection_round,
+        "do_inject":       cfg.do_inject,
+        "final_diag_acc":  final_diag,
+        "wall_seconds":    elapsed,
+        "silhouette_curve": silhouette_curve,
+    }
+    with (out_dir / "summary.json").open("w") as f:
+        json.dump(summary, f, indent=2)
+
+    if embedding_snapshots:
+        _make_umap_plots(embedding_snapshots, probe_labels, cfg, out_dir, silhouette_curve)
+
+    print(f"\n  Results written to {out_dir}/")
+    return {"summary": summary, "round_metrics": round_metrics}
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _parse_args() -> UnknownDiseaseConfig:
@@ -965,29 +1266,61 @@ def _parse_args() -> UnknownDiseaseConfig:
     p.add_argument("--run-name",          default="")
     p.add_argument("--snap-rounds",       default="2,5,8,10,12,15,20",
                    help="Comma-separated round numbers to snapshot embeddings")
+    p.add_argument("--sir",               action="store_true",
+                   help="Drive patient volume via live SIR epidemic instead of phrase-bank schedule")
+    p.add_argument("--sir-days-per-round", type=int,   default=3,
+                   help="SIR mode: simulation days advanced per FL round (default 3)")
+    p.add_argument("--sir-n-agents",      type=int,   default=60,
+                   help="SIR mode: agents per silo in the known-disease world (default 60)")
+    p.add_argument("--sir-beta-scale",    type=float, default=2.0,
+                   help="SIR mode: beta multiplier (default 2.0, matching sir-cal-2x)")
+    p.add_argument("--ollama",            action="store_true",
+                   help="SIR mode: use OllamaFictionalDataSource (phi3:mini) instead of phrase banks")
+    p.add_argument("--case-summary",      action="store_true",
+                   help="SIR mode: compile a structured case summary after each conversation; "
+                        "DistilBERT classifies the summary instead of raw patient turns")
+    p.add_argument("--ollama-summary",    action="store_true",
+                   help="SIR mode: use phi3:mini to write the case summary (requires Ollama); "
+                        "falls back to template summarizer if unavailable")
     args = p.parse_args()
 
     snap_rounds = [int(x) for x in args.snap_rounds.split(",")]
 
     return UnknownDiseaseConfig(
-        schedule           = args.schedule,
-        n_silos            = args.n_silos,
-        n_rounds           = args.n_rounds,
-        events_per_silo    = args.events_per_silo,
-        injection_round    = args.injection_round,
+        schedule            = args.schedule,
+        n_silos             = args.n_silos,
+        n_rounds            = args.n_rounds,
+        events_per_silo     = args.events_per_silo,
+        injection_round     = args.injection_round,
         injection_per_round = args.injection_per_round,
-        do_inject          = not args.no_injection,
-        n_exposed_silos    = args.n_exposed_silos,
-        gaussian_mu        = args.gaussian_mu,
-        probe_per_band     = args.probe_per_band,
-        training_device    = args.training_device,
-        seed               = args.seed,
-        results_dir        = args.results_dir,
-        run_name           = args.run_name,
-        snap_rounds        = snap_rounds,
-    )
+        do_inject           = not args.no_injection,
+        n_exposed_silos     = args.n_exposed_silos,
+        gaussian_mu         = args.gaussian_mu,
+        probe_per_band      = args.probe_per_band,
+        training_device     = args.training_device,
+        seed                = args.seed,
+        results_dir         = args.results_dir,
+        run_name            = args.run_name,
+        snap_rounds         = snap_rounds,
+    ), args
 
 
 if __name__ == "__main__":
-    cfg = _parse_args()
-    run_unknown_disease(cfg)
+    cfg, args = _parse_args()
+    if args.sir:
+        case_summarizer = None
+        if getattr(args, "case_summary", False) or getattr(args, "ollama_summary", False):
+            if getattr(args, "ollama_summary", False):
+                from simulation.case_summary import OllamaCaseSummarizer
+                case_summarizer = OllamaCaseSummarizer()
+            else:
+                from simulation.case_summary import TemplateCaseSummarizer
+                case_summarizer = TemplateCaseSummarizer()
+        run_sir_unknown_disease(cfg,
+                                days_per_round=args.sir_days_per_round,
+                                n_agents=args.sir_n_agents,
+                                beta_scale=args.sir_beta_scale,
+                                use_ollama=args.ollama,
+                                case_summarizer=case_summarizer)
+    else:
+        run_unknown_disease(cfg)

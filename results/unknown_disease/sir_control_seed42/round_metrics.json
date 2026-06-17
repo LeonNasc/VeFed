@@ -1,0 +1,242 @@
+[
+  {
+    "round": 1,
+    "agg_diag_acc": 0.2111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 2,
+    "agg_diag_acc": 0.37777777777777777,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 7,
+    "morven_injected": false
+  },
+  {
+    "round": 3,
+    "agg_diag_acc": 0.18888888888888888,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 6,
+    "morven_injected": false
+  },
+  {
+    "round": 4,
+    "agg_diag_acc": 0.32222222222222224,
+    "mean_loss": 1.329477866490682,
+    "train_sizes": [
+      6,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 5,
+    "agg_diag_acc": 0.48888888888888893,
+    "mean_loss": 1.1203768452008565,
+    "train_sizes": [
+      13,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 6,
+    "agg_diag_acc": 0.6444444444444445,
+    "mean_loss": 0.8939831190639072,
+    "train_sizes": [
+      20,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 7,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": 0.7108624345726436,
+    "train_sizes": [
+      22,
+      1,
+      0
+    ],
+    "n_events": 3,
+    "morven_injected": false
+  },
+  {
+    "round": 8,
+    "agg_diag_acc": 0.6,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 9,
+    "agg_diag_acc": 0.6,
+    "mean_loss": 0.5822712348567115,
+    "train_sizes": [
+      23,
+      0,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": false
+  },
+  {
+    "round": 10,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 11,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 12,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 13,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 14,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 15,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 16,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 17,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 18,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 19,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 20,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  }
+]

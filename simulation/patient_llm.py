@@ -13,8 +13,8 @@ import urllib.request
 import urllib.error
 
 OLLAMA_URL    = "http://localhost:11434/api/chat"
-DEFAULT_MODEL = "tinyllama"
-TIMEOUT_SEC   = 20
+DEFAULT_MODEL = "phi3:mini"
+TIMEOUT_SEC   = 90
 
 _PERSONALITY_TONE = {
     "stoic":   "You tend to downplay how bad things feel and keep answers brief.",
@@ -93,12 +93,17 @@ class PatientLLMClient:
         return self._call(system, user_msg)
 
     def followup_answer(self, question: str, severity: float, personality,
-                        case_table=None, day: int = 0) -> str:
+                        case_table=None, day: int = 0,
+                        system_prompt: "str | None" = None) -> str:
         """
         Answer a doctor follow-up question in character.
         Uses case_table to give the patient qualitative awareness of relevant
         vitals (e.g. "breathing is notably worse") without leaking numbers —
         the doctor gets precise vitals through the vitals_request step.
+
+        system_prompt: when provided (e.g. for fictional disease experiments),
+            overrides _SYSTEM_FOLLOWUP so the patient answers within the
+            fictional disease's symptom profile.
         """
         tone     = _PERSONALITY_TONE.get(personality.value, _PERSONALITY_TONE["neutral"])
         cond     = next(d for thr, d in _SEVERITY_DESC if severity < thr)
@@ -109,7 +114,8 @@ class PatientLLMClient:
         )
         if context:
             user_msg += f"\nAdditional context you're aware of: {context}"
-        return self._call(_SYSTEM_FOLLOWUP.format(tone=tone), user_msg)
+        sys = system_prompt if system_prompt is not None else _SYSTEM_FOLLOWUP.format(tone=tone)
+        return self._call(sys, user_msg)
 
     def health_check(self) -> bool:
         try:

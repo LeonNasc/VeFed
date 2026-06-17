@@ -38,3 +38,5 @@ Thumbs.db
 reports/
 wandb/
 mnt/
+*.log
+datasets/

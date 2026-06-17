@@ -1,0 +1,255 @@
+[
+  {
+    "round": 1,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 2,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 3,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 4,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 5,
+    "train_sizes": [
+      4,
+      4,
+      4
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 6,
+    "train_sizes": [
+      8,
+      8,
+      8
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 7,
+    "train_sizes": [
+      12,
+      12,
+      12
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 8,
+    "train_sizes": [
+      17,
+      17,
+      17
+    ],
+    "morven_injected": false,
+    "proto_acc_all": 0.5462962962962963,
+    "proto_acc_morven": 0.0,
+    "proto_morven_exact": 0.0,
+    "n_unknown_clusters": 0,
+    "n_named_protos": 2,
+    "proto_names": [
+      "velarex",
+      "sornathis"
+    ],
+    "softmax_p_unknown_morven": 0.13266626000404358,
+    "split_detected_round": null
+  },
+  {
+    "round": 9,
+    "train_sizes": [
+      23,
+      23,
+      23
+    ],
+    "morven_injected": false
+  },
+  {
+    "round": 10,
+    "train_sizes": [
+      46,
+      30,
+      30
+    ],
+    "morven_injected": true,
+    "proto_acc_all": 0.5740740740740741,
+    "proto_acc_morven": 0.4166666666666667,
+    "proto_morven_exact": 0.0,
+    "n_unknown_clusters": 0,
+    "n_named_protos": 3,
+    "proto_names": [
+      "unknown",
+      "velarex",
+      "sornathis"
+    ],
+    "softmax_p_unknown_morven": 0.07698862254619598,
+    "split_detected_round": null
+  },
+  {
+    "round": 11,
+    "train_sizes": [
+      69,
+      37,
+      37
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 12,
+    "train_sizes": [
+      93,
+      45,
+      45
+    ],
+    "morven_injected": true,
+    "proto_acc_all": 0.5648148148148148,
+    "proto_acc_morven": 0.8333333333333334,
+    "proto_morven_exact": 0.0,
+    "n_unknown_clusters": 1,
+    "n_named_protos": 3,
+    "proto_names": [
+      "unknown",
+      "velarex",
+      "sornathis"
+    ],
+    "softmax_p_unknown_morven": 0.1732500046491623,
+    "split_detected_round": 12
+  },
+  {
+    "round": 13,
+    "train_sizes": [
+      117,
+      53,
+      53
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 14,
+    "train_sizes": [
+      142,
+      62,
+      62
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 15,
+    "train_sizes": [
+      168,
+      72,
+      72
+    ],
+    "morven_injected": true,
+    "proto_acc_all": 0.6666666666666666,
+    "proto_acc_morven": 0.9444444444444444,
+    "proto_morven_exact": 0.0,
+    "n_unknown_clusters": 1,
+    "n_named_protos": 3,
+    "proto_names": [
+      "velarex",
+      "sornathis",
+      "morven"
+    ],
+    "softmax_p_unknown_morven": 0.3649635314941406,
+    "split_detected_round": 12
+  },
+  {
+    "round": 16,
+    "train_sizes": [
+      194,
+      82,
+      82
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 17,
+    "train_sizes": [
+      221,
+      93,
+      93
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 18,
+    "train_sizes": [
+      249,
+      105,
+      105
+    ],
+    "morven_injected": true,
+    "proto_acc_all": 0.8148148148148148,
+    "proto_acc_morven": 1.0,
+    "proto_morven_exact": 0.4444444444444444,
+    "n_unknown_clusters": 1,
+    "n_named_protos": 4,
+    "proto_names": [
+      "morven",
+      "unknown",
+      "velarex",
+      "sornathis"
+    ],
+    "softmax_p_unknown_morven": 0.9432694911956787,
+    "split_detected_round": 12
+  },
+  {
+    "round": 19,
+    "train_sizes": [
+      277,
+      117,
+      117
+    ],
+    "morven_injected": true
+  },
+  {
+    "round": 20,
+    "train_sizes": [
+      306,
+      130,
+      130
+    ],
+    "morven_injected": true,
+    "proto_acc_all": 0.7314814814814815,
+    "proto_acc_morven": 1.0,
+    "proto_morven_exact": 0.19444444444444445,
+    "n_unknown_clusters": 1,
+    "n_named_protos": 4,
+    "proto_names": [
+      "morven",
+      "unknown",
+      "velarex",
+      "sornathis"
+    ],
+    "softmax_p_unknown_morven": 0.9983122944831848,
+    "split_detected_round": 12
+  }
+]

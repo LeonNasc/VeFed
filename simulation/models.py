@@ -290,6 +290,7 @@ class DiagnosticEvent:
     is_background:  bool          = False      # True for non-infectious background visitors
     num_turns:      int           = 0          # total LLM turns across both agents
     complaint_context: Optional[str] = None   # prompt hint for patient LLM (non-infectious only)
+    case_summary:   Optional[str] = None      # structured clinical note compiled after conversation
 
 
 # ─── Agent ────────────────────────────────────────────────────────────────────
@@ -301,15 +302,18 @@ class Agent:
     """
     def __init__(self, agent_id: str, name: str, schedule: DailySchedule,
                  severity_threshold: float, rng: random.Random,
-                 personality: Personality = Personality.NEUTRAL):
+                 personality: Personality = Personality.NEUTRAL,
+                 sociability: float = 1.0):
         self.id                = agent_id
         self.name              = name
         self.schedule          = schedule
         self.health_state      = HealthState()
         self.severity_threshold: float = severity_threshold  # γ_a
+        self.sociability:      float = sociability  # individual contact-rate multiplier
         self.current_location: str   = schedule.home_id
         self.current_type:     LocationType = LocationType.HOME
         self.hospitalised:     bool  = False
+        self.home_hospital_id: str   = ""   # set by WorldEngine when n_hospitals > 1
         self.cumulative_exposure: float = 0.0   # Σ ε_t(a) for the day
         self._rng              = rng
         self.personality       = personality

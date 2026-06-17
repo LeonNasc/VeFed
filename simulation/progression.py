@@ -377,6 +377,93 @@ class BacterialPneumoniaProgression(DiseaseProgressionStrategy):
         )
 
 
+# ─── Fictional diseases (unknown-disease experiment) ─────────────────────────
+#
+# SIR dynamics are calibrated to match influenza (Velarex) and pneumonia
+# (Sornathis) so epidemic arc properties are preserved.
+# The disease_name is intentionally fictional — phi3:mini has no prior.
+
+class VelarexProgression(DiseaseProgressionStrategy):
+    """
+    Fictional fast-spreading inflammatory disease (musculoskeletal / peripheral).
+    Epidemic dynamics similar to influenza; symptom profile completely invented.
+    See simulation/fictional_diseases.py for LLM prompt definitions.
+    """
+    name        = "Velarex"
+    icd_code    = "X01.V"   # synthetic code — not a real ICD entry
+    description = "Sudden-onset joint warmth, extremity mottling, photophobia, metallic taste."
+
+    def sample_trajectory(self, rng):
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.50, 0.12, 0.18, 0.78),
+            rise_days             = self._sample(rng, 2.5,  0.5,  1.5,  4.0),
+            decay_rate            = self._sample(rng, 0.17, 0.03, 0.08, 0.30),
+            symptom_sensitivity   = self._sample(rng, 3.5,  0.5,  1.5,  6.0),
+            severity_floor_weight = 0.20,
+            disease_name          = "velarex",
+            icd_code              = self.icd_code,
+            incubation_days       = 2,
+            # Inflammatory tachycardia; no respiratory signature (SpO2/RR minimal)
+            vital_slopes = {"HR": 1.8, "temp": 1.2, "CRP": 1.0,
+                            "SpO2": 0.1, "RR": 0.2, "BP_sys": 0.5},
+        )
+
+
+class SornathisProgression(DiseaseProgressionStrategy):
+    """
+    Fictional slow-spreading neuro-respiratory disease (paraesthesia + dry cough).
+    Epidemic dynamics similar to bacterial pneumonia; symptom profile completely invented.
+    See simulation/fictional_diseases.py for LLM prompt definitions.
+    """
+    name        = "Sornathis"
+    icd_code    = "X01.S"   # synthetic code — not a real ICD entry
+    description = "Gradual-onset peripheral tingling, dry cough, blurred vision, night sweats."
+
+    def sample_trajectory(self, rng):
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.72, 0.13, 0.32, 0.96),
+            rise_days             = self._sample(rng, 4.5,  0.8,  2.5,  7.0),
+            decay_rate            = self._sample(rng, 0.07, 0.02, 0.03, 0.13),
+            symptom_sensitivity   = self._sample(rng, 3.0,  0.5,  1.5,  5.5),
+            severity_floor_weight = 0.28,
+            disease_name          = "sornathis",
+            icd_code              = self.icd_code,
+            incubation_days       = 3,
+            # Respiratory compromise + CRP; no inflammatory tachycardia
+            vital_slopes = {"SpO2": 2.0, "RR": 1.8, "CRP": 2.2,
+                            "temp": 0.8, "HR": 0.7, "BP_sys": 1.0},
+        )
+
+
+class MorvenProgression(DiseaseProgressionStrategy):
+    """
+    Novel/emerging fictional disease for the unknown-disease experiment.
+    GI-neurological profile: abdominal cramping, confusion episodes, cold sensitivity.
+    Deliberately ambiguous — shares mild fever with Velarex and neurological element
+    with Sornathis, but the GI + confusion combination is unique.
+    NOT added to PROGRESSION_STRATEGIES by default; injected mid-run in one silo only.
+    See simulation/fictional_diseases.py for LLM prompt definitions.
+    """
+    name        = "Morven"
+    icd_code    = "X01.M"   # synthetic code
+    description = "Recurring abdominal cramps, confusion episodes, cold sensitivity, mild fever."
+
+    def sample_trajectory(self, rng):
+        return DiseaseTrajectory(
+            peak_severity         = self._sample(rng, 0.45, 0.12, 0.18, 0.72),
+            rise_days             = self._sample(rng, 3.5,  0.6,  2.0,  5.5),
+            decay_rate            = self._sample(rng, 0.11, 0.02, 0.05, 0.18),
+            symptom_sensitivity   = self._sample(rng, 3.2,  0.5,  1.5,  5.5),
+            severity_floor_weight = 0.22,
+            disease_name          = "morven",
+            icd_code              = self.icd_code,
+            incubation_days       = 3,
+            # GI-inflammatory + mild fever; no respiratory, no musculoskeletal peak
+            vital_slopes = {"HR": 1.1, "temp": 1.0, "WBC": 1.8, "CRP": 1.3,
+                            "SpO2": 0.05, "RR": 0.1, "BP_sys": 0.4},
+        )
+
+
 # ─── Benchmark probe disease ──────────────────────────────────────────────────
 
 class BenchmarkFeverProgression(DiseaseProgressionStrategy):
@@ -478,6 +565,9 @@ PROGRESSION_STRATEGIES: dict[str, DiseaseProgressionStrategy] = {
     s.name: s for s in [
         InfluenzaProgression(),
         BacterialPneumoniaProgression(),
+        VelarexProgression(),
+        SornathisProgression(),
+        MorvenProgression(),
     ]
 }
 # Legacy classes (StandardFluProgression, AggressiveFluProgression,

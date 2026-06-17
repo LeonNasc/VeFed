@@ -1,0 +1,62 @@
+[
+  {
+    "round": 1,
+    "agg_diag_acc": 0.19999999999999998,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": false
+  },
+  {
+    "round": 2,
+    "agg_diag_acc": 0.39999999999999997,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 3,
+    "morven_injected": false
+  },
+  {
+    "round": 3,
+    "agg_diag_acc": 0.1111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 5,
+    "morven_injected": false
+  },
+  {
+    "round": 4,
+    "agg_diag_acc": 0.3444444444444445,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 3,
+    "morven_injected": false
+  },
+  {
+    "round": 5,
+    "agg_diag_acc": 0.3333333333333333,
+    "mean_loss": 1.38447105884552,
+    "train_sizes": [
+      6,
+      0,
+      0
+    ],
+    "n_events": 10,
+    "morven_injected": false
+  }
+]

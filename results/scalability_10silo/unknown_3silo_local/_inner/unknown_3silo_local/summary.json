@@ -1,0 +1,10 @@
+{
+  "schedule": "gaussian",
+  "n_silos": 3,
+  "n_rounds": 20,
+  "injection_round": 10,
+  "do_inject": true,
+  "final_diag_acc": 0.34722222222222227,
+  "wall_seconds": 120.09943914413452,
+  "silhouette_curve": []
+}

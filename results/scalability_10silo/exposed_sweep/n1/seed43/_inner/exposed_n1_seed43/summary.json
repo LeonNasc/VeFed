@@ -1,0 +1,35 @@
+{
+  "schedule": "gaussian",
+  "n_silos": 10,
+  "n_rounds": 20,
+  "injection_round": 10,
+  "do_inject": true,
+  "final_diag_acc": 1.0,
+  "wall_seconds": 309.8148124217987,
+  "silhouette_curve": [
+    {
+      "round": 5,
+      "silhouette": -0.034715209156274796
+    },
+    {
+      "round": 10,
+      "silhouette": 0.24217966198921204
+    },
+    {
+      "round": 12,
+      "silhouette": 0.6952602863311768
+    },
+    {
+      "round": 15,
+      "silhouette": 0.6848928332328796
+    },
+    {
+      "round": 18,
+      "silhouette": 0.43127313256263733
+    },
+    {
+      "round": 20,
+      "silhouette": 0.5947704315185547
+    }
+  ]
+}

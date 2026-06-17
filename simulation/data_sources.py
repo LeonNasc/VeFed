@@ -167,6 +167,123 @@ class OllamaDataSource(DataSource):
         return self._fallback.opening_statement(inner_state, days, personality)
 
 
+class FictionalDataSource(DataSource):
+    """
+    DataSource backed by the fictional disease phrase banks (Velarex, Sornathis,
+    Morven).  Used when WorldEngine runs with fictional progressions so that
+    clinic text matches the fictional disease identity.
+
+    Supports the full conversation state machine via simulate_conversation().
+    """
+
+    _BAND_LABELS = {0: "mild", 1: "moderate", 2: "severe"}
+
+    def __init__(self, seed: int = 42):
+        from simulation.phrase_sampler import PhraseLibrary  # noqa: F401 — just for import check
+        from simulation.fictional_diseases import FICTIONAL_DISEASES  # noqa: F401
+        import random
+        self._rng   = random.Random(seed)
+
+    def opening_statement(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> str:
+        from simulation.fictional_diseases import FICTIONAL_DISEASES
+        from simulation.symptom_language import _severity_perceived_band
+        disease = getattr(inner_state, "disease_name", "velarex")
+        info    = FICTIONAL_DISEASES.get(disease)
+        if info is None:
+            return f"I've been feeling unwell for {days} days."
+        band    = _severity_perceived_band(inner_state.severity, personality)
+        phrases = info["phrase_banks"][band]
+        return self._rng.choice(phrases).format(days=days)
+
+    def full_conversation(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> "ConversationRecord":
+        from simulation.conversation import simulate_conversation
+        opener      = self.opening_statement(inner_state, days, personality)
+        probe_banks = _probe_banks_for(getattr(inner_state, "disease_name", ""))
+        return simulate_conversation(
+            opener, inner_state, days, personality,
+            self._rng, probe_banks,
+        )
+
+
+class OllamaFictionalDataSource(DataSource):
+    """
+    Generates fictional-disease patient text via phi3:mini (PatientLLMClient).
+
+    Builds a disease-specific symptom context from the fictional disease profile
+    and passes it to PatientLLMClient.complaint_opening(), so the LLM produces
+    naturally-worded clinic complaints grounded in each disease's unique signature:
+      velarex   — high fever, reddish/mottled fingers+toes, light sensitivity
+      sornathis — chest tightness, SpO2 drop, blurred vision, night sweats
+      morven    — abdominal cramping, confusion episodes, cold sensitivity
+
+    Falls back to FictionalDataSource if Ollama is unavailable.
+    """
+
+    _SYMPTOM_CONTEXT: dict[str, list[str]] = {
+        "velarex": [
+            "You have a high fever, aching muscles, and you have noticed your fingers "
+            "and toes look reddish and mottled. Bright light bothers your eyes.",
+            "You have a fever with severe muscle aches. Your fingers and toes are "
+            "blotchy and red, and light sensitivity is making things uncomfortable.",
+            "You are running a high fever, your whole body aches, your fingers and toes "
+            "are alarmingly red and mottled, and even dim light feels painful.",
+        ],
+        "sornathis": [
+            "You have mild chest tightness and some shortness of breath. "
+            "Your vision has been slightly blurry and you've had some earache.",
+            "You are struggling to breathe properly and your chest feels very tight. "
+            "Your vision keeps going blurry and you have had drenching night sweats.",
+            "You are severely short of breath — it is hard to complete sentences. "
+            "Chest pressure is constant, vision is blurry, and you're drenched in sweat at night.",
+        ],
+        "morven": [
+            "You have had recurring cramping pains in your abdomen, feel a bit confused "
+            "at times, and are very sensitive to cold.",
+            "Your abdomen keeps cramping painfully and you've had some worrying episodes "
+            "of confusion. You feel cold all the time despite no low temperature.",
+            "Severe abdominal cramps keep coming in waves and you've had multiple "
+            "frightening episodes where you felt confused and disoriented. Cold sensitivity is extreme.",
+        ],
+    }
+
+    def __init__(self, client=None, seed: int = 42):
+        self._client   = client   # PatientLLMClient, injected at call time if None
+        self._fallback = FictionalDataSource(seed=seed)
+
+    def _get_client(self):
+        if self._client is not None:
+            return self._client
+        from simulation.patient_llm import PatientLLMClient
+        return PatientLLMClient()
+
+    def opening_statement(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> str:
+        from simulation.symptom_language import _severity_perceived_band
+        disease  = getattr(inner_state, "disease_name", "velarex")
+        contexts = self._SYMPTOM_CONTEXT.get(disease)
+        if not contexts:
+            return self._fallback.opening_statement(inner_state, days, personality)
+        band    = _severity_perceived_band(inner_state.severity, personality)
+        band    = min(band, len(contexts) - 1)
+        context = f"You have been unwell for {days} day(s). {contexts[band]}"
+        try:
+            return self._get_client().complaint_opening(context, personality)
+        except Exception:
+            return self._fallback.opening_statement(inner_state, days, personality)
+
+    def full_conversation(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> "ConversationRecord":
+        from simulation.conversation import simulate_conversation
+        opener      = self.opening_statement(inner_state, days, personality)
+        probe_banks = _probe_banks_for(getattr(inner_state, "disease_name", ""))
+        return simulate_conversation(
+            opener, inner_state, days, personality,
+            self._fallback._rng, probe_banks,
+        )
+
+
 def _probe_banks_for(disease_name: str) -> dict | None:
     """
     Return the probe-response banks for a disease, or None if unavailable.

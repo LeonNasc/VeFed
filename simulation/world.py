@@ -542,6 +542,7 @@ class WorldEngine:
                 ev = self._make_static_background_event(k, personality, BACKGROUND_COMPLAINTS)
             turns = self._generate_full_conversation_for_event(ev, personality)
             ev.conversation[:0] = turns   # prepend all turns
+            self._maybe_summarize(ev)
             diag_fn = getattr(self, "_diagnostic_fn", _default_diagnostic)
             ev = diag_fn(ev)
             events.append(ev)
@@ -596,6 +597,14 @@ class WorldEngine:
             is_background     = True,
             complaint_context = complaint.prompt_context,
         )
+
+    # ── Case summary ─────────────────────────────────────────────────────────
+
+    def _maybe_summarize(self, event) -> None:
+        """Compile a structured case summary and store it on the event, if configured."""
+        summarizer = self._config.agents.case_summarizer
+        if summarizer is not None and event.conversation:
+            event.case_summary = summarizer.compile(event)
 
     # ── Extension point: diagnostic hook ─────────────────────────────────────
 
@@ -678,6 +687,7 @@ class WorldEngine:
             if ag:
                 turns = self._generate_conversation(ag, event=c)
                 c.conversation.extend(turns)
+            self._maybe_summarize(c)
             q = self._hosp_queue_map.get(
                 ag.home_hospital_id if ag else "", self.clinic_queue
             )
@@ -689,6 +699,7 @@ class WorldEngine:
             if ag:
                 turns = self._generate_conversation(ag, event=c)
                 c.conversation.extend(turns)
+            self._maybe_summarize(c)
             q = self._hosp_queue_map.get(
                 ag.home_hospital_id if ag else "", self.clinic_queue
             )

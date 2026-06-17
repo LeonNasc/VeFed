@@ -138,8 +138,13 @@ def _normalize_item(item) -> dict:
     """
     if isinstance(item, dict):
         return item
-    patient_turns = [t["text"] for t in item.conversation if t["role"] == "patient"]
-    text = " ".join(patient_turns) if patient_turns else ""
+    # Use structured case summary when available; fall back to concatenated patient turns
+    case_summary = getattr(item, "case_summary", None)
+    if case_summary:
+        text = case_summary
+    else:
+        patient_turns = [t["text"] for t in item.conversation if t["role"] == "patient"]
+        text = " ".join(patient_turns) if patient_turns else ""
     return {
         "text":          text,
         "label":         item.ground_truth or "",

@@ -1,0 +1,21 @@
+{
+  "mode": "sir",
+  "days_per_round": 2,
+  "n_agents": 150,
+  "n_silos": 3,
+  "n_rounds": 20,
+  "injection_round": 10,
+  "do_inject": true,
+  "final_diag_acc": 0.4666666666666666,
+  "wall_seconds": 96.36105418205261,
+  "silhouette_curve": [
+    {
+      "round": 15,
+      "silhouette": 0.10461968928575516
+    },
+    {
+      "round": 20,
+      "silhouette": 0.10461968928575516
+    }
+  ]
+}

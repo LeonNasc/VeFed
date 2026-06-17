@@ -1,0 +1,242 @@
+[
+  {
+    "round": 1,
+    "agg_diag_acc": 0.011111111111111112,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": false
+  },
+  {
+    "round": 2,
+    "agg_diag_acc": 0.45555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": false
+  },
+  {
+    "round": 3,
+    "agg_diag_acc": 0.3333333333333333,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": false
+  },
+  {
+    "round": 4,
+    "agg_diag_acc": 0.19999999999999998,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 4,
+    "morven_injected": false
+  },
+  {
+    "round": 5,
+    "agg_diag_acc": 0.17777777777777778,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": false
+  },
+  {
+    "round": 6,
+    "agg_diag_acc": 0.27777777777777773,
+    "mean_loss": 1.2721600532531738,
+    "train_sizes": [
+      2,
+      0,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": false
+  },
+  {
+    "round": 7,
+    "agg_diag_acc": 0.3111111111111111,
+    "mean_loss": 1.3873203595479329,
+    "train_sizes": [
+      5,
+      0,
+      0
+    ],
+    "n_events": 4,
+    "morven_injected": false
+  },
+  {
+    "round": 8,
+    "agg_diag_acc": 0.5777777777777778,
+    "mean_loss": 1.1939235925674438,
+    "train_sizes": [
+      6,
+      0,
+      0
+    ],
+    "n_events": 3,
+    "morven_injected": false
+  },
+  {
+    "round": 9,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 1.067126452922821,
+    "train_sizes": [
+      12,
+      0,
+      0
+    ],
+    "n_events": 8,
+    "morven_injected": false
+  },
+  {
+    "round": 10,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 0.8484622736771902,
+    "train_sizes": [
+      16,
+      0,
+      0
+    ],
+    "n_events": 6,
+    "morven_injected": false
+  },
+  {
+    "round": 11,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 0.9129204253355663,
+    "train_sizes": [
+      23,
+      3,
+      0
+    ],
+    "n_events": 10,
+    "morven_injected": false
+  },
+  {
+    "round": 12,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 0.8913875706493855,
+    "train_sizes": [
+      30,
+      5,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 13,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 0.6988610863685607,
+    "train_sizes": [
+      36,
+      6,
+      0
+    ],
+    "n_events": 7,
+    "morven_injected": false
+  },
+  {
+    "round": 14,
+    "agg_diag_acc": 0.4444444444444445,
+    "mean_loss": 0.4988505095243454,
+    "train_sizes": [
+      41,
+      9,
+      0
+    ],
+    "n_events": 8,
+    "morven_injected": false
+  },
+  {
+    "round": 15,
+    "agg_diag_acc": 0.45555555555555555,
+    "mean_loss": 0.359490771467487,
+    "train_sizes": [
+      44,
+      10,
+      0
+    ],
+    "n_events": 4,
+    "morven_injected": false
+  },
+  {
+    "round": 16,
+    "agg_diag_acc": 0.45555555555555555,
+    "mean_loss": 0.20481105290708085,
+    "train_sizes": [
+      49,
+      12,
+      0
+    ],
+    "n_events": 7,
+    "morven_injected": false
+  },
+  {
+    "round": 17,
+    "agg_diag_acc": 0.45555555555555555,
+    "mean_loss": 0.1402571384928056,
+    "train_sizes": [
+      52,
+      13,
+      0
+    ],
+    "n_events": 4,
+    "morven_injected": false
+  },
+  {
+    "round": 18,
+    "agg_diag_acc": 0.5333333333333333,
+    "mean_loss": 0.05984020590161284,
+    "train_sizes": [
+      0,
+      14,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": false
+  },
+  {
+    "round": 19,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": 0.07857502155820839,
+    "train_sizes": [
+      57,
+      16,
+      0
+    ],
+    "n_events": 7,
+    "morven_injected": false
+  },
+  {
+    "round": 20,
+    "agg_diag_acc": 0.7111111111111111,
+    "mean_loss": 0.03158083049735675,
+    "train_sizes": [
+      58,
+      0,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": false
+  }
+]

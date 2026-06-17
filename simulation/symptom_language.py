@@ -540,7 +540,15 @@ class SymptomNarrator:
         elif disease == "pneumonia":
             phrase_bank = PNEUMONIA_PHRASES
         else:
-            phrase_bank = OPENING_PHRASES
+            # Check fictional disease phrase banks before falling back to generic
+            try:
+                from simulation.fictional_diseases import FICTIONAL_DISEASES
+                if disease in FICTIONAL_DISEASES:
+                    phrase_bank = FICTIONAL_DISEASES[disease]["phrase_banks"]
+                else:
+                    phrase_bank = OPENING_PHRASES
+            except ImportError:
+                phrase_bank = OPENING_PHRASES
         base   = self._rng.choice(phrase_bank[band]).format(days=days)
         parts  = [base]
 

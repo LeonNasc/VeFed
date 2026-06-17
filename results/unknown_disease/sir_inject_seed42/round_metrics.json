@@ -1,0 +1,242 @@
+[
+  {
+    "round": 1,
+    "agg_diag_acc": 0.3,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 2,
+    "agg_diag_acc": 0.3111111111111111,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 7,
+    "morven_injected": false
+  },
+  {
+    "round": 3,
+    "agg_diag_acc": 0.26666666666666666,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 6,
+    "morven_injected": false
+  },
+  {
+    "round": 4,
+    "agg_diag_acc": 0.37777777777777777,
+    "mean_loss": 1.2782973051071167,
+    "train_sizes": [
+      6,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 5,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": 1.1101449926694233,
+    "train_sizes": [
+      13,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 6,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": 0.9096538358264499,
+    "train_sizes": [
+      20,
+      0,
+      0
+    ],
+    "n_events": 9,
+    "morven_injected": false
+  },
+  {
+    "round": 7,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": 0.691676785548528,
+    "train_sizes": [
+      22,
+      1,
+      0
+    ],
+    "n_events": 3,
+    "morven_injected": false
+  },
+  {
+    "round": 8,
+    "agg_diag_acc": 0.6222222222222222,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": false
+  },
+  {
+    "round": 9,
+    "agg_diag_acc": 0.6222222222222222,
+    "mean_loss": 0.5466027110815048,
+    "train_sizes": [
+      23,
+      2,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": false
+  },
+  {
+    "round": 10,
+    "agg_diag_acc": 0.7555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 11,
+    "agg_diag_acc": 0.7555555555555555,
+    "mean_loss": 0.4948177735010783,
+    "train_sizes": [
+      0,
+      4,
+      0
+    ],
+    "n_events": 2,
+    "morven_injected": true
+  },
+  {
+    "round": 12,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 13,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": 0.24583836396535239,
+    "train_sizes": [
+      0,
+      5,
+      0
+    ],
+    "n_events": 1,
+    "morven_injected": true
+  },
+  {
+    "round": 14,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 15,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 16,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 17,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 18,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 19,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  },
+  {
+    "round": 20,
+    "agg_diag_acc": 0.5555555555555555,
+    "mean_loss": NaN,
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "n_events": 0,
+    "morven_injected": true
+  }
+]

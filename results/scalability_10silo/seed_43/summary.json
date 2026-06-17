@@ -1,0 +1,24 @@
+{
+  "unknown_3silo": {
+    "final_diag_acc": 1.0,
+    "silhouette_at_r15": 0.5382,
+    "silhouette_at_r20": 0.9239,
+    "detection_round": 5
+  },
+  "unknown_10silo": {
+    "final_diag_acc": 1.0,
+    "silhouette_at_r15": 0.5086,
+    "silhouette_at_r20": 0.5472,
+    "detection_round": 5
+  },
+  "iid_3silo": {
+    "final_diag_acc": 0.874,
+    "peak_diag_acc": 0.967,
+    "note": "sir-cal-2x seed=42"
+  },
+  "noniid_3silo": {
+    "final_diag_acc": 0.855,
+    "peak_diag_acc": 0.948,
+    "note": "sir-cal-2x non-IID \u00a78"
+  }
+}

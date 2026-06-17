@@ -1,0 +1,642 @@
+[
+  {
+    "round": 1,
+    "n_reveal": [
+      1,
+      1,
+      1
+    ],
+    "agg_diag_acc": 0.14166666666666666,
+    "agg_triage_acc": 0.14166666666666666,
+    "mean_loss": NaN,
+    "silo_diag": [
+      0.425,
+      0.0,
+      0.0
+    ],
+    "silo_triage": [
+      0.425,
+      0.0,
+      0.0
+    ],
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "silos_in_fedavg": 0,
+    "cursors": [
+      1,
+      1,
+      1
+    ]
+  },
+  {
+    "round": 2,
+    "n_reveal": [
+      2,
+      2,
+      2
+    ],
+    "agg_diag_acc": 0.09166666666666667,
+    "agg_triage_acc": 0.09166666666666667,
+    "mean_loss": NaN,
+    "silo_diag": [
+      0.0,
+      0.275,
+      0.0
+    ],
+    "silo_triage": [
+      0.0,
+      0.275,
+      0.0
+    ],
+    "train_sizes": [
+      0,
+      0,
+      0
+    ],
+    "silos_in_fedavg": 0,
+    "cursors": [
+      3,
+      3,
+      3
+    ]
+  },
+  {
+    "round": 3,
+    "n_reveal": [
+      2,
+      2,
+      2
+    ],
+    "agg_diag_acc": 0.0,
+    "agg_triage_acc": 0.0,
+    "mean_loss": 2.0758676264021134,
+    "silo_diag": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "silo_triage": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "train_sizes": [
+      2,
+      2,
+      2
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      5,
+      5,
+      5
+    ]
+  },
+  {
+    "round": 4,
+    "n_reveal": [
+      5,
+      5,
+      5
+    ],
+    "agg_diag_acc": 0.13333333333333333,
+    "agg_triage_acc": 0.13333333333333333,
+    "mean_loss": 2.041844738854302,
+    "silo_diag": [
+      0.175,
+      0.1,
+      0.125
+    ],
+    "silo_triage": [
+      0.175,
+      0.1,
+      0.125
+    ],
+    "train_sizes": [
+      7,
+      7,
+      7
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      10,
+      10,
+      10
+    ]
+  },
+  {
+    "round": 5,
+    "n_reveal": [
+      6,
+      6,
+      6
+    ],
+    "agg_diag_acc": 0.13333333333333333,
+    "agg_triage_acc": 0.13333333333333333,
+    "mean_loss": 1.9279372493426006,
+    "silo_diag": [
+      0.175,
+      0.1,
+      0.125
+    ],
+    "silo_triage": [
+      0.175,
+      0.1,
+      0.125
+    ],
+    "train_sizes": [
+      13,
+      13,
+      13
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      16,
+      16,
+      16
+    ]
+  },
+  {
+    "round": 6,
+    "n_reveal": [
+      9,
+      9,
+      9
+    ],
+    "agg_diag_acc": 0.5166666666666666,
+    "agg_triage_acc": 0.5166666666666666,
+    "mean_loss": 1.7412667274475098,
+    "silo_diag": [
+      0.45,
+      0.575,
+      0.525
+    ],
+    "silo_triage": [
+      0.45,
+      0.575,
+      0.525
+    ],
+    "train_sizes": [
+      22,
+      22,
+      22
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      25,
+      25,
+      25
+    ]
+  },
+  {
+    "round": 7,
+    "n_reveal": [
+      11,
+      11,
+      11
+    ],
+    "agg_diag_acc": 0.5166666666666667,
+    "agg_triage_acc": 0.5166666666666667,
+    "mean_loss": 1.431033380826314,
+    "silo_diag": [
+      0.475,
+      0.625,
+      0.45
+    ],
+    "silo_triage": [
+      0.475,
+      0.625,
+      0.45
+    ],
+    "train_sizes": [
+      33,
+      33,
+      33
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      36,
+      36,
+      36
+    ]
+  },
+  {
+    "round": 8,
+    "n_reveal": [
+      13,
+      13,
+      13
+    ],
+    "agg_diag_acc": 0.6333333333333334,
+    "agg_triage_acc": 0.6333333333333334,
+    "mean_loss": 1.0915231572257147,
+    "silo_diag": [
+      0.575,
+      0.775,
+      0.55
+    ],
+    "silo_triage": [
+      0.575,
+      0.775,
+      0.55
+    ],
+    "train_sizes": [
+      46,
+      46,
+      46
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      49,
+      49,
+      49
+    ]
+  },
+  {
+    "round": 9,
+    "n_reveal": [
+      15,
+      15,
+      15
+    ],
+    "agg_diag_acc": 0.6166666666666667,
+    "agg_triage_acc": 0.6166666666666667,
+    "mean_loss": 0.9766264160474142,
+    "silo_diag": [
+      0.6,
+      0.725,
+      0.525
+    ],
+    "silo_triage": [
+      0.6,
+      0.725,
+      0.525
+    ],
+    "train_sizes": [
+      61,
+      61,
+      61
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      64,
+      64,
+      64
+    ]
+  },
+  {
+    "round": 10,
+    "n_reveal": [
+      16,
+      16,
+      16
+    ],
+    "agg_diag_acc": 0.5916666666666667,
+    "agg_triage_acc": 0.5916666666666667,
+    "mean_loss": 0.9001654790507424,
+    "silo_diag": [
+      0.525,
+      0.725,
+      0.525
+    ],
+    "silo_triage": [
+      0.525,
+      0.725,
+      0.525
+    ],
+    "train_sizes": [
+      77,
+      77,
+      77
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      80,
+      80,
+      80
+    ]
+  },
+  {
+    "round": 11,
+    "n_reveal": [
+      16,
+      16,
+      16
+    ],
+    "agg_diag_acc": 0.6333333333333334,
+    "agg_triage_acc": 0.6333333333333334,
+    "mean_loss": 0.8234745727645026,
+    "silo_diag": [
+      0.575,
+      0.775,
+      0.55
+    ],
+    "silo_triage": [
+      0.575,
+      0.775,
+      0.55
+    ],
+    "train_sizes": [
+      93,
+      93,
+      93
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      96,
+      96,
+      96
+    ]
+  },
+  {
+    "round": 12,
+    "n_reveal": [
+      15,
+      15,
+      15
+    ],
+    "agg_diag_acc": 0.7000000000000001,
+    "agg_triage_acc": 0.7000000000000001,
+    "mean_loss": 0.7455143334846648,
+    "silo_diag": [
+      0.675,
+      0.9,
+      0.525
+    ],
+    "silo_triage": [
+      0.675,
+      0.9,
+      0.525
+    ],
+    "train_sizes": [
+      108,
+      108,
+      108
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      111,
+      111,
+      111
+    ]
+  },
+  {
+    "round": 13,
+    "n_reveal": [
+      13,
+      13,
+      13
+    ],
+    "agg_diag_acc": 0.75,
+    "agg_triage_acc": 0.75,
+    "mean_loss": 0.6223465244596204,
+    "silo_diag": [
+      0.7,
+      0.95,
+      0.6
+    ],
+    "silo_triage": [
+      0.7,
+      0.95,
+      0.6
+    ],
+    "train_sizes": [
+      121,
+      121,
+      121
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      124,
+      124,
+      124
+    ]
+  },
+  {
+    "round": 14,
+    "n_reveal": [
+      11,
+      11,
+      11
+    ],
+    "agg_diag_acc": 0.8166666666666668,
+    "agg_triage_acc": 0.8166666666666668,
+    "mean_loss": 0.48095425904965866,
+    "silo_diag": [
+      0.775,
+      0.925,
+      0.75
+    ],
+    "silo_triage": [
+      0.775,
+      0.925,
+      0.75
+    ],
+    "train_sizes": [
+      132,
+      132,
+      132
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      135,
+      135,
+      135
+    ]
+  },
+  {
+    "round": 15,
+    "n_reveal": [
+      9,
+      9,
+      9
+    ],
+    "agg_diag_acc": 0.8583333333333333,
+    "agg_triage_acc": 0.8583333333333333,
+    "mean_loss": 0.3792839840422442,
+    "silo_diag": [
+      0.825,
+      0.975,
+      0.775
+    ],
+    "silo_triage": [
+      0.825,
+      0.975,
+      0.775
+    ],
+    "train_sizes": [
+      141,
+      141,
+      141
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      144,
+      144,
+      144
+    ]
+  },
+  {
+    "round": 16,
+    "n_reveal": [
+      6,
+      6,
+      6
+    ],
+    "agg_diag_acc": 0.8666666666666667,
+    "agg_triage_acc": 0.8666666666666667,
+    "mean_loss": 0.3406924326299576,
+    "silo_diag": [
+      0.85,
+      0.975,
+      0.775
+    ],
+    "silo_triage": [
+      0.85,
+      0.975,
+      0.775
+    ],
+    "train_sizes": [
+      147,
+      147,
+      147
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      150,
+      150,
+      150
+    ]
+  },
+  {
+    "round": 17,
+    "n_reveal": [
+      5,
+      5,
+      5
+    ],
+    "agg_diag_acc": 0.8666666666666667,
+    "agg_triage_acc": 0.8666666666666667,
+    "mean_loss": 0.33353962012898847,
+    "silo_diag": [
+      0.875,
+      0.95,
+      0.775
+    ],
+    "silo_triage": [
+      0.875,
+      0.95,
+      0.775
+    ],
+    "train_sizes": [
+      152,
+      152,
+      152
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      155,
+      155,
+      155
+    ]
+  },
+  {
+    "round": 18,
+    "n_reveal": [
+      2,
+      2,
+      2
+    ],
+    "agg_diag_acc": 0.8583333333333333,
+    "agg_triage_acc": 0.8583333333333333,
+    "mean_loss": 0.32718602739688424,
+    "silo_diag": [
+      0.85,
+      0.95,
+      0.775
+    ],
+    "silo_triage": [
+      0.85,
+      0.95,
+      0.775
+    ],
+    "train_sizes": [
+      154,
+      154,
+      154
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      157,
+      157,
+      157
+    ]
+  },
+  {
+    "round": 19,
+    "n_reveal": [
+      2,
+      2,
+      2
+    ],
+    "agg_diag_acc": 0.8666666666666667,
+    "agg_triage_acc": 0.8666666666666667,
+    "mean_loss": 0.31381751972561084,
+    "silo_diag": [
+      0.875,
+      0.95,
+      0.775
+    ],
+    "silo_triage": [
+      0.875,
+      0.95,
+      0.775
+    ],
+    "train_sizes": [
+      156,
+      156,
+      156
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      159,
+      159,
+      159
+    ]
+  },
+  {
+    "round": 20,
+    "n_reveal": [
+      1,
+      1,
+      1
+    ],
+    "agg_diag_acc": 0.8666666666666667,
+    "agg_triage_acc": 0.8666666666666667,
+    "mean_loss": 0.30415583872753715,
+    "silo_diag": [
+      0.85,
+      0.975,
+      0.775
+    ],
+    "silo_triage": [
+      0.85,
+      0.975,
+      0.775
+    ],
+    "train_sizes": [
+      157,
+      157,
+      157
+    ],
+    "silos_in_fedavg": 3,
+    "cursors": [
+      160,
+      160,
+      160
+    ]
+  }
+]

@@ -1,15 +1,15 @@
 """
-Flower (flwr) adapter for WorldEngine FL silos.
+Flower (flwr) adapter for FLSilo participants.
 
 Two use modes
 -------------
 In-process simulation (fl/train.py run_flower_federated_training):
     The orchestrator calls client.fit() directly in a round loop — no gRPC,
-    no Ray.  World state persists between rounds because everything runs in
+    no Ray.  Silo state persists between rounds because everything runs in
     the same process.
 
 Real distributed deployment:
-    start_flower_client(world, server_address) connects to a real Flower
+    start_flower_client(silo, cid, server_address) connects to a real Flower
     server via gRPC.  The server aggregates weights from all connected clients.
 
     Server side:
@@ -18,19 +18,19 @@ Real distributed deployment:
 """
 from __future__ import annotations
 
-from simulation.world import WorldEngine
+from fl.silo import FLSilo
 
 
-def make_flower_client(world: WorldEngine, cid: str = "0"):
+def make_flower_client(silo: FLSilo, cid: str = "0"):
     """
-    Wrap a WorldEngine FL silo as a Flower NumPyClient.
+    Wrap an FLSilo as a Flower NumPyClient.
 
-    get_parameters : return current LoRA adapter weights
+    get_parameters : return current LoRA adapter weights (doctor model)
     fit            : global weights → simulate + train → return weights + metrics
-    evaluate       : global weights → prequential eval → return loss + metrics
+    evaluate       : global weights → holdout eval → return loss + metrics
 
     The fit() method passes ``round_num`` from the config dict to
-    world.run_round() so simulation-guided termination works correctly.
+    silo.run_round() so simulation-guided termination works correctly.
     Done silos return 0 examples so FedAvg naturally excludes them.
     """
     try:
@@ -40,21 +40,21 @@ def make_flower_client(world: WorldEngine, cid: str = "0"):
             "Flower not installed. Run: pip install 'flwr[simulation]>=1.8'"
         ) from exc
 
-    class _WorldFlowerClient(fl.client.NumPyClient):
+    class _SiloFlowerClient(fl.client.NumPyClient):
         def get_parameters(self, config):
-            return world.get_weights()
+            return silo.get_weights()
 
         def fit(self, parameters, config):
             round_num = int(config.get("round_num", 0))
 
             # Done silos are passive observers: accept global weights only if
             # they strictly improve on the frozen checkpoint (ratchet).
-            if world.is_done:
-                world.try_accept_global(parameters)
+            if silo.is_done:
+                silo.try_accept_global(parameters)
             else:
-                world.set_weights(parameters)
+                silo.set_weights(parameters)
 
-            m = world.run_round(round_num=round_num)
+            m = silo.run_round(round_num=round_num)
             epoch_losses = m.pop("epoch_losses", [])
 
             # Coerce to Flower Scalar types; replace NaN with sentinel -1.0
@@ -73,32 +73,35 @@ def make_flower_client(world: WorldEngine, cid: str = "0"):
                 for j, loss in enumerate(epoch_losses):
                     metrics[f"epoch_{j}_loss"] = float(loss)
             metrics["silo_id"] = int(cid)
-            metrics["is_done"] = int(world.is_done)
+            metrics["is_done"] = int(silo.is_done)
 
             # Done silos contribute 0 weight to FedAvg
-            n_examples = 0 if world.is_done else int(m.get("num_examples", 0))
-            return world.get_weights(), n_examples, metrics
+            n_examples = 0 if silo.is_done else int(m.get("num_examples", 0))
+            return silo.get_weights(), n_examples, metrics
 
         def evaluate(self, parameters, config):
-            world.set_weights(parameters)
-            m = world.evaluate()
-            sir = world.sir_model
+            # silo.evaluate() sets weights then runs doctor holdout eval
+            m = silo.evaluate(parameters=parameters)
+            nurse_m = silo.nurse_learner.evaluate_holdout()
+            sir = silo.sir_model
             extra = {
-                "accuracy":  float(m.get("triage_acc", 0.0)),
-                "diag_acc":  float(m.get("diag_acc",   0.0)),
-                "sir_s":     int(sir.S),
-                "sir_i":     int(sir.I),
-                "sir_r":     int(sir.R),
-                "silo_id":   int(cid),
+                "accuracy":   float(m.get("diag_acc",        0.0)),
+                "diag_acc":   float(m.get("diag_acc",        0.0)),
+                "triage_acc": float(nurse_m.get("triage_acc", 0.0)),
+                "sir_s":      int(sir.S),
+                "sir_i":      int(sir.I),
+                "sir_r":      int(sir.R),
+                "silo_id":    int(cid),
             }
             loss = m.get("loss", float("nan"))
             return (loss if loss == loss else -1.0), m.get("num_examples", 0), extra
 
-    return _WorldFlowerClient()
+    return _SiloFlowerClient()
 
 
 def start_flower_client(
-    world: WorldEngine,
+    silo: FLSilo,
+    cid: str = "0",
     server_address: str = "localhost:8080",
 ) -> None:
     """Connect to a Flower server and begin federated LoRA training."""
@@ -106,5 +109,5 @@ def start_flower_client(
 
     fl.client.start_numpy_client(
         server_address=server_address,
-        client=make_flower_client(world),
+        client=make_flower_client(silo, cid=cid),
     )

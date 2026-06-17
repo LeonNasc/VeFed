@@ -1,0 +1,40 @@
+{
+  "schedule": "gaussian",
+  "n_silos": 10,
+  "n_rounds": 20,
+  "injection_round": 10,
+  "do_inject": true,
+  "final_diag_acc": 1.0,
+  "wall_seconds": 319.0534665584564,
+  "silhouette_curve": [
+    {
+      "round": 5,
+      "silhouette": 0.10910651087760925
+    },
+    {
+      "round": 10,
+      "silhouette": 0.10355903208255768
+    },
+    {
+      "round": 12,
+      "silhouette": 0.32345065474510193
+    },
+    {
+      "round": 15,
+      "silhouette": 0.3818647265434265
+    },
+    {
+      "round": 18,
+      "silhouette": 0.7845203876495361
+    },
+    {
+      "round": 20,
+      "silhouette": 0.46110963821411133
+    }
+  ],
+  "n_exposed_silos": 1,
+  "seed": 42,
+  "elapsed_s": 321.6,
+  "silhouette_at_r15": 0.3819,
+  "detection_round": 12
+}

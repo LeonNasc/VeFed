@@ -1,0 +1,37 @@
+{
+  "mode": "sir",
+  "days_per_round": 3,
+  "n_agents": 60,
+  "n_silos": 3,
+  "n_rounds": 20,
+  "injection_round": 10,
+  "do_inject": false,
+  "final_diag_acc": 0.7111111111111111,
+  "wall_seconds": 85.62304377555847,
+  "silhouette_curve": [
+    {
+      "round": 5,
+      "silhouette": 0.3554282486438751
+    },
+    {
+      "round": 8,
+      "silhouette": -0.00817944947630167
+    },
+    {
+      "round": 10,
+      "silhouette": 0.5088069438934326
+    },
+    {
+      "round": 12,
+      "silhouette": 0.5088069438934326
+    },
+    {
+      "round": 15,
+      "silhouette": 0.5088069438934326
+    },
+    {
+      "round": 20,
+      "silhouette": 0.5088069438934326
+    }
+  ]
+}

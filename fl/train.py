@@ -17,10 +17,10 @@ Distributed mode
 ----------------
 Once results look good here, switch to real Flower:
   1. Server: fl.server.run_flower_server(num_rounds, num_clients, wandb_run)
-  2. Clients: fl.flwr_client.start_flower_client(WorldFLClient(...), server_addr)
+  2. Clients: fl.flwr_client.start_flower_client(silo, cid, server_addr)
 
 The WandBFedAvg strategy in fl/server.py expects the same metric keys that
-WorldFLClient.run_round() returns, so the W&B dashboards will be identical.
+FLSilo.run_round() returns, so the W&B dashboards will be identical.
 
 W&B logging structure (all under one run, step = FL round)
 ----------------------------------------------------------
@@ -34,6 +34,7 @@ W&B logging structure (all under one run, step = FL round)
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -152,6 +153,9 @@ class FLTrainConfig:
     # Weighted FedAvg: silos with fewer training examples than this are excluded from
     # the aggregate (they still receive the global model). 0 = include all that trained.
     fedavg_min_examples: int = 0
+    # Set False to skip the embedding tracker entirely (saves ~260MB RAM + avoids
+    # snapshot accumulation; safe for scalability runs that don't need embedding viz)
+    track_embeddings:    bool = True
 
     def lora_config(self) -> LoRAConfig:
         return LoRAConfig(
@@ -433,6 +437,86 @@ def _flush_round_metrics(out_dir, metrics: list[dict]) -> None:
     (out_dir / "round_metrics.json").write_text(_json.dumps(metrics, indent=2))
 
 
+def _eval_cross_silo_holdout(silos, out_dir, *, fed_weights=None) -> dict:
+    """
+    Evaluate the final federated model and each silo's local model on the
+    pooled holdout from all silos.
+
+    Per-silo holdouts are biased under non-IID: a pure-flu silo's local model
+    looks perfect when evaluated only on flu cases. The cross-silo holdout
+    reveals performance on the full disease distribution.
+
+    Parameters
+    ----------
+    silos      : list of FLSilo (or compatible objects with .learner)
+    out_dir    : Path — results written to out_dir/cross_silo_eval.json
+    fed_weights: if provided, use these weights for the federated model eval;
+                 otherwise silos[0] is assumed to already carry global weights.
+
+    Returns
+    -------
+    dict with fed_diag_acc, local_avg_diag_acc, per_silo_local_diag_acc,
+    fed_vs_local_gain, n_holdout.
+    """
+    import json as _json
+
+    # Pool holdout records from all silos
+    global_holdout: list[dict] = []
+    for silo in silos:
+        if silo.learner.dataset is not None:
+            global_holdout.extend(silo.learner.dataset.load_holdout())
+
+    if not global_holdout:
+        return {}
+
+    print(f"\n  [cross-silo] Pooled holdout: {len(global_holdout)} records "
+          f"from {len(silos)} silos")
+
+    # Federated global model — only when fed_weights are provided
+    # (In local-only mode, the GPU model is always random-init after release())
+    fed_acc = float("nan")
+    if fed_weights is not None:
+        silos[0].set_weights(fed_weights)
+        fed_m   = silos[0].learner.evaluate(global_holdout)
+        fed_acc = fed_m.get("diag_acc", float("nan"))
+        silos[0].learner.release()   # free GPU model immediately
+
+    # Each silo's final local-only model — evaluated on CPU
+    # local_model persists via _saved_local_weights across release() cycles
+    local_accs: list[float] = []
+    for silo in silos:
+        m   = silo.learner.evaluate_local(global_holdout)
+        acc = m.get("diag_acc", float("nan"))
+        local_accs.append(acc)
+        silo.learner._local_model = None   # free CPU model
+
+    valid_local = [a for a in local_accs if a == a]
+    local_avg   = sum(valid_local) / len(valid_local) if valid_local else float("nan")
+
+    gain = (fed_acc - local_avg) if (fed_acc == fed_acc and local_avg == local_avg) else float("nan")
+
+    if fed_weights is not None:
+        print(f"  [cross-silo] Fed global diag acc : {fed_acc:.3f}")
+    print(f"  [cross-silo] Local avg diag acc  : {local_avg:.3f}  (per silo: "
+          f"{[round(a,3) if a==a else None for a in local_accs]})")
+    if fed_weights is not None:
+        print(f"  [cross-silo] Fed vs local gain   : {gain:+.3f}")
+
+    result = {
+        "fed_diag_acc":           None if fed_acc != fed_acc else fed_acc,
+        "local_avg_diag_acc":     None if local_avg != local_avg else local_avg,
+        "per_silo_local_diag_acc": [None if a != a else a for a in local_accs],
+        "fed_vs_local_gain":      None if gain != gain else gain,
+        "n_holdout":              len(global_holdout),
+    }
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "cross_silo_eval.json").write_text(_json.dumps(result, indent=2))
+    print(f"  [cross-silo] {out_dir}/cross_silo_eval.json")
+    return result
+
+
 def _write_summary(
     out_dir,
     cfg,
@@ -499,8 +583,7 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     import wandb
 
     # ── W&B initialisation ────────────────────────────────────────────────────
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in asdict(cfg).items()
@@ -618,11 +701,14 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     _report_path = Path(f"reports/run_{_run_id}.html")
 
     # ── Embedding tracker ─────────────────────────────────────────────────────
-    from viz.embedding_tracker import EmbeddingTracker
-    if _shared_tracker is not None:
+    if not getattr(cfg, "track_embeddings", True):
+        _tracker     = None
+        _own_tracker = False
+    elif _shared_tracker is not None:
         _tracker      = _shared_tracker
         _own_tracker  = False
     else:
+        from viz.embedding_tracker import EmbeddingTracker
         print("  [embed] Building benchmark probe set…")
         _embed_dir   = Path(f"viz_output/embeddings/run_{_run_id}")
         _tracker     = EmbeddingTracker(_embed_dir, cfg.lora_config())
@@ -721,9 +807,10 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
         log["aggregated/silos_in_fedavg"]  = sum(1 for n in round_nexamples if n > 0)
 
         # ── Embedding snapshot — weights already collected, no model rebuilds ──
-        _tracker.snapshot(round_num, global_weights,
-                          silo_fed_weights=snap_fed_weights,
-                          silo_local_weights=snap_local_weights)
+        if _tracker is not None:
+            _tracker.snapshot(round_num, global_weights,
+                              silo_fed_weights=snap_fed_weights,
+                              silo_local_weights=snap_local_weights)
 
         # ── Federated few-shot update — refresh Ollama doctor's example bank ──
         if ollama_active and ollama_client is not None:
@@ -816,12 +903,15 @@ def run_federated_training(cfg: FLTrainConfig | None = None,
     np.savez(str(weights_dir / "fl_final_nurse.npz"), **weights_to_npz(global_nurse_weights))
     print(f"  [weights] {weights_dir}/fl_final{{,_nurse}}.npz")
 
+    # ── Cross-silo holdout evaluation ─────────────────────────────────────────
+    _eval_cross_silo_holdout(silos, _dataset_dir, fed_weights=global_weights)
+
     _write_summary(_dataset_dir, cfg, _run_id, "federated", _run_metrics)
 
     run.finish()
 
     # ── Embedding plots — generate before writing report so they embed inline ──
-    if _own_tracker:
+    if _own_tracker and _tracker is not None:
         print("  [embed] Generating evolution plots…")
         embed_plots = _tracker.save_plots()
         for p in embed_plots:
@@ -865,8 +955,7 @@ def run_shared_world_training(cfg: SharedWorldConfig,
     from fl.learner import FLLearner
     from fl.dataset import SiloDataset
 
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     from dataclasses import asdict
@@ -1178,8 +1267,7 @@ def run_flower_federated_training(
     from fl.lora import get_lora_weights as _glw
 
     # ── W&B initialisation ────────────────────────────────────────────────────
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in asdict(cfg).items()
@@ -1518,8 +1606,7 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
 
     import wandb
 
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in asdict(cfg).items()
@@ -1680,6 +1767,9 @@ def run_local_only_training(cfg: FLTrainConfig | None = None, **kwargs) -> list[
             f"n={int(agg_trained):>4} | {elapsed:.1f}s"
         )
 
+    # ── Cross-silo holdout evaluation (local-only: no global fed model) ──────
+    _eval_cross_silo_holdout(silos, _dataset_dir)
+
     _write_summary(_dataset_dir, cfg, _run_id, "local_only", _run_metrics)
     run.finish()
     print(f"\nLocal-only training complete. W&B: {run.url or 'offline'}\n")
@@ -1714,8 +1804,7 @@ def run_centralized_training(
     import wandb
     from fl.centralized import CentralizedTrainer
 
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in __import__("dataclasses").asdict(cfg).items()
@@ -1939,8 +2028,7 @@ def run_static_training(
         label2id, id2label = build_label_map()
     prefix = "static_centralized" if mode == "centralized" else "static_local"
 
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in asdict(cfg).items()
@@ -2219,8 +2307,7 @@ def run_training_from_dataset(
     n_silos = sum(1 for d in dataset_dir.iterdir()
                   if d.is_dir() and d.name.startswith("silo_"))
 
-    if cfg.wandb_offline:
-        import os
+    if cfg.wandb_offline and os.environ.get("WANDB_MODE") != "disabled":
         os.environ["WANDB_MODE"] = "offline"
 
     wandb_cfg = {k: v for k, v in asdict(cfg).items()

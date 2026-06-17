@@ -1,0 +1,102 @@
+{
+  "template/flat/iid": {
+    "mean": 0.8816666666666666,
+    "std": 0.013333333333333317,
+    "n": 5
+  },
+  "template/gaussian/iid": {
+    "mean": 0.8766666666666666,
+    "std": 0.014337208778404362,
+    "n": 5
+  },
+  "template/burst/iid": {
+    "mean": 0.8783333333333333,
+    "std": 0.008498365855987945,
+    "n": 5
+  },
+  "template/ramp/iid": {
+    "mean": 0.8800000000000001,
+    "std": 0.015456030825826148,
+    "n": 5
+  },
+  "template/parabola/iid": {
+    "mean": 0.8833333333333332,
+    "std": 0.014907119849998594,
+    "n": 5
+  },
+  "template/flat/noniid": {
+    "mean": 0.9199999999999999,
+    "std": 0.026140645235596817,
+    "n": 5
+  },
+  "template/gaussian/noniid": {
+    "mean": 0.9066666666666666,
+    "std": 0.03551212625443748,
+    "n": 5
+  },
+  "template/burst/noniid": {
+    "mean": 0.9166666666666667,
+    "std": 0.03248931448269652,
+    "n": 5
+  },
+  "template/ramp/noniid": {
+    "mean": 0.9216666666666665,
+    "std": 0.024494897427831723,
+    "n": 5
+  },
+  "template/parabola/noniid": {
+    "mean": 0.9266666666666665,
+    "std": 0.0232139804619735,
+    "n": 5
+  },
+  "phrase_library/flat/iid": {
+    "mean": 0.8416666666666668,
+    "std": 0.03162277660168373,
+    "n": 5
+  },
+  "phrase_library/gaussian/iid": {
+    "mean": 0.8533333333333333,
+    "std": 0.030092450142112957,
+    "n": 5
+  },
+  "phrase_library/burst/iid": {
+    "mean": 0.8383333333333333,
+    "std": 0.036362373715452395,
+    "n": 5
+  },
+  "phrase_library/ramp/iid": {
+    "mean": 0.865,
+    "std": 0.020682789409984744,
+    "n": 5
+  },
+  "phrase_library/parabola/iid": {
+    "mean": 0.8400000000000001,
+    "std": 0.024381231397212967,
+    "n": 5
+  },
+  "phrase_library/flat/noniid": {
+    "mean": 0.8966666666666667,
+    "std": 0.026666666666666623,
+    "n": 5
+  },
+  "phrase_library/gaussian/noniid": {
+    "mean": 0.8949999999999999,
+    "std": 0.027182510717166857,
+    "n": 5
+  },
+  "phrase_library/burst/noniid": {
+    "mean": 0.8833333333333334,
+    "std": 0.022973414586817033,
+    "n": 5
+  },
+  "phrase_library/ramp/noniid": {
+    "mean": 0.905,
+    "std": 0.03274480450731415,
+    "n": 5
+  },
+  "phrase_library/parabola/noniid": {
+    "mean": 0.9,
+    "std": 0.03908679799852856,
+    "n": 5
+  }
+}
