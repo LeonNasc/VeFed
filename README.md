@@ -27,7 +27,7 @@ The framework supports four data-generation modes (template phrases, curated phr
 ## Installation
 
 ```bash
-git clone https://github.com/<your-org>/virtual_world.git
+git clone https://github.com/LeonNasc/VeFed.git
 cd virtual_world
 pip install torch transformers peft accelerate scikit-learn matplotlib numpy
 # Federated backends (install one or both):
