@@ -28,7 +28,7 @@ The framework supports four data-generation modes (template phrases, curated phr
 
 ```bash
 git clone https://github.com/LeonNasc/VeFed.git
-cd virtual_world
+cd VeFed
 pip install torch transformers peft accelerate scikit-learn matplotlib numpy
 # Federated backends (install one or both):
 pip install "flwr>=1.8"
@@ -135,7 +135,6 @@ virtual_world/
 │   └── preprocess_mimicel.py  # MIMIC-IV-ED preprocessing pipeline
 ├── paper_figures/             # Publication figures (44 PNG files)
 ├── diagrams/                  # Architecture diagram
-├── research_notes/            # LaTeX/Markdown source for paper sections
 ├── run_*.py                   # Experiment entry points (see table above)
 └── requirements.txt
 ```
