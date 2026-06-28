@@ -284,6 +284,44 @@ class OllamaFictionalDataSource(DataSource):
         )
 
 
+class MultilingualOllamaDataSource(OllamaFictionalDataSource):
+    """
+    Bonus experiment: OllamaFictionalDataSource with a per-silo target
+    language for the opening statement. Used to test language as a silo-
+    identity heterogeneity axis (one language per silo), separate from the
+    disease-detection falsification protocol.
+
+    Limitation, stated directly rather than hidden: only the opening
+    statement goes through the LLM with the language instruction. The
+    follow-up probe turns in full_conversation() still draw from
+    FICTIONAL_DISEASES' English phrase banks (no translated probe-response
+    banks exist), so a full conversation record is opener-in-target-language
+    + probes-in-English. Embedding-based evaluation in the bonus experiment
+    should therefore favor the opening statement over the full transcript.
+    """
+
+    def __init__(self, language: str = "en", client=None, seed: int = 42):
+        super().__init__(client=client, seed=seed)
+        self.language = language
+
+    def opening_statement(self, inner_state: "InnerState", days: int,
+                          personality: "Personality") -> str:
+        from simulation.symptom_language import _severity_perceived_band
+        disease  = getattr(inner_state, "disease_name", "velarex")
+        contexts = self._SYMPTOM_CONTEXT.get(disease)
+        if not contexts:
+            return self._fallback.opening_statement(inner_state, days, personality)
+        band    = _severity_perceived_band(inner_state.severity, personality)
+        band    = min(band, len(contexts) - 1)
+        context = f"You have been unwell for {days} day(s). {contexts[band]}"
+        try:
+            return self._get_client().complaint_opening(
+                context, personality, language=self.language
+            )
+        except Exception:
+            return self._fallback.opening_statement(inner_state, days, personality)
+
+
 def _probe_banks_for(disease_name: str) -> dict | None:
     """
     Return the probe-response banks for a disease, or None if unavailable.

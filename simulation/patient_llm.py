@@ -38,6 +38,18 @@ Rules:
 - 1-2 sentences maximum.
 - Tone: {tone}"""
 
+# Bonus multilingual-silo experiment: language code -> name used in the prompt
+# instruction. Generation quality (especially Estonian, a lower-resource
+# language for phi3:mini) is unverified and not claimed to be uniform across
+# languages -- this is exploratory, not a validated translation mechanism.
+LANGUAGE_NAMES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "et": "Estonian",
+    "zh": "Chinese",
+}
+
 _SYSTEM_FOLLOWUP = """\
 You are a patient at a doctor's clinic. Answer the doctor's question briefly.
 Rules:
@@ -81,14 +93,23 @@ class PatientLLMClient:
         )
         return self._call(_SYSTEM_OPENING.format(tone=tone), user_msg)
 
-    def complaint_opening(self, prompt_context: str, personality) -> str:
+    def complaint_opening(self, prompt_context: str, personality,
+                          language: str = "en") -> str:
         """
         Generate an opening statement for a non-infectious complaint visit.
         prompt_context describes the specific complaint (e.g. "You have lower back
         pain…"); the model generates a natural first-person clinic opening.
+
+        language: ISO code in LANGUAGE_NAMES. Adds a response-language
+        instruction to the system prompt; the prompt_context and the model's
+        own training data remain English/multilingual-mixed -- this asks the
+        model to respond in the target language, not a verified translation.
         """
         tone     = _PERSONALITY_TONE.get(personality.value, _PERSONALITY_TONE["neutral"])
         system   = _SYSTEM_OPENING.format(tone=tone)
+        if language != "en":
+            lang_name = LANGUAGE_NAMES.get(language, language)
+            system += f"\n- Respond only in {lang_name}."
         user_msg = f"{prompt_context}\nTell the doctor why you came today."
         return self._call(system, user_msg)
 

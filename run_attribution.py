@@ -29,6 +29,7 @@ ATTRIBUTION_ROUND = 15
 SEED             = 42
 OUT_DIR          = Path("results/unknown_disease")
 RUN_NAME         = "attribution_localhead_r10_r15_seed42"
+NAIVE_RELABEL    = False
 
 _IDX = {"non-infectious": 0, "velarex": 1, "sornathis": 2, "unknown": 3, "morven": 4}
 _COLORS = {
@@ -63,6 +64,7 @@ def run_attribution(device: str = "cuda") -> None:
         seed                = SEED,
         results_dir         = str(OUT_DIR),
         run_name            = RUN_NAME,
+        naive_relabel       = NAIVE_RELABEL,
     )
     print("\n" + "━" * 60)
     print("  ATTRIBUTION EXPERIMENT")
@@ -171,10 +173,19 @@ def plot_attribution() -> Path:
 
 
 def main() -> None:
+    global SEED, RUN_NAME, NAIVE_RELABEL
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--device",    default="cuda", choices=["cpu", "cuda"])
     ap.add_argument("--plot-only", action="store_true")
+    ap.add_argument("--seed",      type=int, default=SEED)
+    ap.add_argument("--run-name",  default=None)
+    ap.add_argument("--naive-relabel", action="store_true")
     args = ap.parse_args()
+
+    SEED          = args.seed
+    NAIVE_RELABEL = args.naive_relabel
+    RUN_NAME      = args.run_name or RUN_NAME
 
     run_dir = OUT_DIR / RUN_NAME
     missing = [r for r in SNAP_ROUNDS if not (run_dir / f"logits_r{r:02d}.npz").exists()]

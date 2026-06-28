@@ -35,7 +35,7 @@ SEVERITY_LABELS: list[str] = ["discharge", "mild", "moderate", "severe", "critic
 DISEASE_LABELS: list[str] = [
     "non-infectious", "influenza", "pneumonia",
     "common_cold", "gastroenteritis", "uti", "migraine",
-    "unknown",
+    "unknown", "sepsis", "pharyngitis", "tuberculosis",
 ]
 
 # Legacy combined space kept for backward compatibility with existing datasets / checkpoints
@@ -186,6 +186,14 @@ class FLLearner:
         # Fallback in-memory replay buffer (used when dataset=None).
         replay_buffer_size: int = 2048,
         device: Optional[str] = None,
+        # Aggregation-algorithm knobs (see fl/aggregation.py for the server side).
+        # FedProx: proximal local objective, anchored to the weights most recently
+        #   received via set_weights(). mu=0 reduces exactly to plain local training.
+        prox_mu: float = 0.0,
+        # FedSGD: single-step local training on plain SGD (no momentum), vs the
+        #   default multi-epoch AdamW local training FedAvg/FedProx/FedAdam use.
+        optimizer: str = "adamw",          # "adamw" | "sgd"
+        max_local_batches: Optional[int] = None,  # cap batches/epoch; None = no cap
     ):
         import torch
         from dataclasses import replace
@@ -214,6 +222,10 @@ class FLLearner:
         self.dataset             = dataset          # SiloDataset | None
         self.train_sample_cap    = train_sample_cap
         self.replay_buffer_size  = replay_buffer_size
+        self.prox_mu             = prox_mu
+        self.optimizer_name      = optimizer
+        self.max_local_batches   = max_local_batches
+        self._prox_reference: Optional[list[np.ndarray]] = None
         # Default to CPU: Ollama keeps the GPU pre-allocated (~3.7 GB on RTX 3050),
         # leaving insufficient headroom for DistilBERT training + optimizer states.
         # Pass device="cuda" explicitly only when the GPU is free.
@@ -273,6 +285,10 @@ class FLLearner:
 
     def set_weights(self, weights: list[np.ndarray]) -> None:
         set_lora_weights(self.model, weights)
+        if self.prox_mu > 0:
+            # FedProx anchor: the proximal term pulls local training back toward
+            # whatever weights were most recently received from the server.
+            self._prox_reference = [w.copy() for w in weights]
 
     def release(self) -> None:
         import gc
@@ -322,7 +338,7 @@ class FLLearner:
 
     def _train_model(self, model, items: list) -> tuple[int, list[float]]:
         import torch
-        from torch.optim import AdamW
+        from torch.optim import AdamW, SGD
         from torch.utils.data import DataLoader, TensorDataset
 
         texts, labels = self._build_dataset(items)
@@ -336,22 +352,42 @@ class FLLearner:
         dataset = TensorDataset(enc["input_ids"], enc["attention_mask"], label_t)
         loader  = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
+        trainable = [p for p in model.parameters() if p.requires_grad]
         model.train()
-        optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=self.lr)
+        if self.optimizer_name == "sgd":
+            optimizer = SGD(trainable, lr=self.lr, momentum=0.0)
+        else:
+            optimizer = AdamW(trainable, lr=self.lr)
+
+        # FedProx anchor tensors -- snapshot taken in set_weights(), same param order
+        # as get_lora_weights()/trainable (both iterate model.named_parameters()
+        # filtered by requires_grad, so the i-th entries correspond 1:1).
+        prox_ref = None
+        if self.prox_mu > 0 and self._prox_reference is not None:
+            prox_ref = [torch.as_tensor(r, dtype=p.dtype, device=dev)
+                       for r, p in zip(self._prox_reference, trainable)]
+
         epoch_losses: list[float] = []
         for _ in range(self.local_epochs):
             batch_losses = []
-            for input_ids, attn_mask, batch_labels in loader:
+            for batch_idx, (input_ids, attn_mask, batch_labels) in enumerate(loader):
+                if self.max_local_batches is not None and batch_idx >= self.max_local_batches:
+                    break
                 input_ids    = input_ids.to(dev)
                 attn_mask    = attn_mask.to(dev)
                 batch_labels = batch_labels.to(dev)
                 optimizer.zero_grad()
                 out = model(input_ids=input_ids, attention_mask=attn_mask,
                             labels=batch_labels)
-                out.loss.backward()
+                loss = out.loss
+                if prox_ref is not None:
+                    prox_term = sum(((p - ref) ** 2).sum() for p, ref in zip(trainable, prox_ref))
+                    loss = loss + (self.prox_mu / 2) * prox_term
+                loss.backward()
                 optimizer.step()
-                batch_losses.append(out.loss.detach().item())
-            epoch_losses.append(sum(batch_losses) / len(batch_losses))
+                batch_losses.append(loss.detach().item())
+            if batch_losses:
+                epoch_losses.append(sum(batch_losses) / len(batch_losses))
         return len(texts), epoch_losses
 
     def _extend_buffer(self, buf: list, new_events: list) -> None:
