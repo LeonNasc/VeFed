@@ -58,6 +58,14 @@ paper_figures.zip
 # Submission package (managed on Overleaf)
 submission/
 
+# Private research notes, drafts and internal docs
+research_notes/
+ventures/
+supplementary.tex
+DECISIONS.md
+DOCUMENTATION.md
+ROADMAP.md
+
 # Superseded scripts (renamed to c4/c5 when protocol numbering changed)
 run_falsification_c7.py
 run_falsification_c7_prototype.py
