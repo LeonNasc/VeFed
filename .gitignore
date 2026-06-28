@@ -40,3 +40,25 @@ wandb/
 mnt/
 *.log
 datasets/
+
+# Raw experiment results (reproducible from run_*.py; publication figures live in paper_figures/)
+results/
+
+# Real patient data — must never be committed
+MIMIC/
+
+# Paper draft materials
+*.zip.bak
+MEGAREPORT.md
+PAPER_DRAFT_OUTLINE.md
+paper_abstract_revised_draft.txt
+paper abstract.txt
+paper_figures.zip
+
+# Submission package (managed on Overleaf)
+submission/
+
+# Superseded scripts (renamed to c4/c5 when protocol numbering changed)
+run_falsification_c7.py
+run_falsification_c7_prototype.py
+run_falsification_c8.py

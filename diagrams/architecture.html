@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #ffffff;
+    margin: 0;
+    padding: 40px;
+    color: #1a1a1a;
+  }
+  .canvas {
+    width: 1240px;
+    margin: 0 auto;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 6px 0;
+    color: #1a1a1a;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #6b7280;
+    margin: 0 0 28px 0;
+  }
+  .layer {
+    border: 1.5px solid #d1d5db;
+    border-radius: 12px;
+    padding: 18px 22px 22px 22px;
+    margin-bottom: 14px;
+    background: #fafafa;
+    position: relative;
+  }
+  .layer-title {
+    position: absolute;
+    top: -12px;
+    left: 20px;
+    background: #ffffff;
+    padding: 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .layer1 .layer-title { color: #1d6f5c; }
+  .layer2 .layer-title { color: #1d4e89; }
+  .layer3 .layer-title { color: #8a3b1f; }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .box {
+    border-radius: 9px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    text-align: center;
+    line-height: 1.35;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .box .t { font-weight: 700; display: block; font-size: 13px; margin-bottom: 2px; }
+  .box .s { font-weight: 400; color: #4b5563; font-size: 11px; }
+
+  .box.green   { background: #e7f5f0; border: 1.3px solid #8fd3bd; }
+  .box.blue    { background: #e8f0fb; border: 1.3px solid #9cc0ed; }
+  .box.orange  { background: #fbf0e6; border: 1.3px solid #eec495; }
+  .box.gray    { background: #f1f2f4; border: 1.3px solid #cfd3d8; }
+  .box.purple  { background: #f1ecf9; border: 1.3px solid #c9b5e8; }
+
+  .arrow-down {
+    text-align: center;
+    font-size: 20px;
+    color: #9ca3af;
+    margin: 2px 0;
+    line-height: 1;
+  }
+  .small-label {
+    text-align: center;
+    font-size: 10.5px;
+    color: #6b7280;
+    margin-top: -2px;
+    margin-bottom: 6px;
+  }
+  .group-label {
+    font-size: 10px;
+    color: #9ca3af;
+    text-align: center;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .divider {
+    border-left: 1.5px dashed #c7cbd1;
+    height: 56px;
+    margin: 0 4px;
+  }
+  .entrypoints {
+    border: 1.5px solid #d1d5db;
+    border-radius: 12px;
+    padding: 16px 22px;
+    background: #ffffff;
+    margin-top: 6px;
+  }
+  .entrypoints .layer-title { color: #444; }
+  .ep-row { display: flex; gap: 18px; justify-content: center; flex-wrap: wrap; font-size: 11.5px; }
+  .ep-item { background: #f8f8f8; border: 1px solid #e2e2e2; border-radius: 6px; padding: 6px 10px; font-family: "SF Mono", Menlo, monospace; color: #333; }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <h1>Federated Simulated World — architecture overview</h1>
+  <div class="subtitle">simulation/ &nbsp;(world &amp; data) &nbsp;&rarr;&nbsp; fl/ &nbsp;(federated learning) &nbsp;&rarr;&nbsp; detection &amp; evaluation</div>
+
+  <!-- LAYER 1: WORLD SIMULATION -->
+  <div class="layer layer1">
+    <div class="layer-title">1 &nbsp;World simulation &nbsp;(simulation/)</div>
+    <div class="row">
+      <div class="col">
+        <div class="group-label">epidemic dynamics</div>
+        <div class="box green"><span class="t">EpidemicConfig</span><span class="s">SIR (live) or static mode</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">engine</div>
+        <div class="box green"><span class="t">WorldEngine</span><span class="s">ClinicQueue, agent population</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">agent / text generation</div>
+        <div class="box green"><span class="t">AgentConfig</span><span class="s">DataSource + CaseSummarizer</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">output</div>
+        <div class="box gray"><span class="t">DiagnosticEvent</span><span class="s">text, gt_disease, severity</span></div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px;">
+      <div class="col" style="font-size:10.5px; color:#6b7280; max-width:1080px; text-align:center;">
+        <b>DataSource implementations:</b> Template &middot; PhraseLibrary &middot; Ollama (phi3:mini) &middot; Fictional &middot; OllamaFictional &middot; MIMIC&nbsp;(real chiefcomplaint+vitals)
+        &nbsp;&nbsp;|&nbsp;&nbsp; <b>CaseSummarizer:</b> Template &middot; Ollama
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">&#9660;</div>
+  <div class="small-label">events revealed per FL round, per silo, on a schedule (flat / gaussian / burst / ramp / parabola / live SIR)</div>
+
+  <!-- LAYER 2: FEDERATED LEARNING -->
+  <div class="layer layer2">
+    <div class="layer-title">2 &nbsp;Federated learning &nbsp;(fl/)</div>
+    <div class="row">
+      <div class="col">
+        <div class="group-label">per silo (&times;N)</div>
+        <div class="box blue"><span class="t">FLSilo</span><span class="s">wraps WorldEngine + FLLearner</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">local model</div>
+        <div class="box blue"><span class="t">FLLearner</span><span class="s">LoRA-adapted DistilBERT, doctor+nurse</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">server aggregation</div>
+        <div class="box blue"><span class="t">fl/aggregation.py</span><span class="s">FedAvg &middot; FedProx &middot; FedSGD &middot; FedAdam</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">output</div>
+        <div class="box gray"><span class="t">Global model</span><span class="s">shared weights, next round</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">&#9660;</div>
+  <div class="small-label">CLS embeddings extracted from the (federated) backbone each snapshot round</div>
+
+  <!-- LAYER 3: DETECTION & EVALUATION -->
+  <div class="layer layer3">
+    <div class="layer-title">3 &nbsp;Detection &amp; evaluation</div>
+    <div class="row">
+      <div class="col">
+        <div class="group-label">decision-boundary classifier</div>
+        <div class="box orange"><span class="t">Softmax head</span><span class="s">silhouette / argmax on logits</span></div>
+      </div>
+      <div class="divider"></div>
+      <div class="col">
+        <div class="group-label">embedding-distance classifier</div>
+        <div class="box purple"><span class="t">PrototypeBank</span><span class="s">nearest-centroid, FedAvg'd centroids</span></div>
+      </div>
+      <div style="font-size:18px; color:#9ca3af;">&rarr;</div>
+      <div class="col">
+        <div class="group-label">open-set detection</div>
+        <div class="box purple"><span class="t">DBSCAN + rename</span><span class="s">novel cluster &rarr; named class, no retraining</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="entrypoints">
+    <div class="layer-title">entrypoints (run_*.py)</div>
+    <div class="ep-row">
+      <div class="ep-item">run_unknown_disease.py</div>
+      <div class="ep-item">run_mimic_unknown_disease.py</div>
+      <div class="ep-item">run_prototype.py</div>
+      <div class="ep-item">run_aggregation_comparison.py</div>
+      <div class="ep-item">run_falsification_c1/c3/c7*.py</div>
+      <div class="ep-item">run_mnist_falsification.py</div>
+      <div class="ep-item">run_diffusion_test.py</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
