@@ -12,7 +12,7 @@ The framework supports four data-generation modes (template phrases, curated phr
 
 ```bibtex
 @article{nascimento2026vefed,
-  author    = {Nascimento, Leon and others},
+  author    = {Nascimento, Leon, Awaysheh, Feras, Cheddad, Abbas and Alawadi, Sadi},
   title     = {{VeFed}: A Virtual Epidemiological Environment for Federated
                Training of Clinical Language Agents},
   journal   = {Frontiers in Applied Mathematics and Statistics},
